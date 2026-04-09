@@ -18,6 +18,7 @@ import { CreateDocumentDto } from './dto/create-document.dto';
 import {
   UpdateDocumentDto,
   AutosaveDocumentDto,
+  UpdateSignatureLayoutDto,
 } from './dto/update-document.dto';
 import { FinaliseDocumentDto } from './dto/finalise-document.dto';
 import { LockDocumentDto } from './dto/lock-document.dto';
@@ -42,6 +43,8 @@ const EMPTY_SPREADSHEET_CONTENT = {
     },
   ],
 };
+
+const DEFAULT_SIGNATURE_ALIGNMENT = 'RIGHT';
 
 @Injectable()
 export class DocumentsService {
@@ -425,6 +428,7 @@ export class DocumentsService {
         signatureImageS3Key: activeSignatureImage?.s3Key ?? null,
         signatureImageMimeType: activeSignatureImage?.mimeType ?? null,
         signatureImageSizeBytes: activeSignatureImage?.sizeBytes ?? null,
+        signatureBlockAlignment: DEFAULT_SIGNATURE_ALIGNMENT,
       },
     });
 
@@ -462,6 +466,45 @@ export class DocumentsService {
     });
 
     return versions;
+  }
+
+  async updateSignatureLayout(
+    userId: string,
+    documentId: string,
+    dto: UpdateSignatureLayoutDto,
+  ) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    if (document.ownerId !== userId) {
+      throw new ForbiddenException(
+        'Only the document owner can update signature placement.',
+      );
+    }
+
+    if (document.status !== 'LOCKED') {
+      throw new ConflictException(
+        'Signature placement can only be adjusted after the document is locked.',
+      );
+    }
+
+    const updated = await this.prisma.document.update({
+      where: { id: documentId },
+      data: {
+        signatureBlockAlignment:
+          dto.alignment ?? document.signatureBlockAlignment ?? DEFAULT_SIGNATURE_ALIGNMENT,
+      },
+    });
+
+    return {
+      ...this.formatDocument(updated),
+      signatureSnapshot: await this.buildSignatureSnapshot(updated),
+    };
   }
 
   async restoreVersion(
@@ -731,6 +774,12 @@ export class DocumentsService {
       typeof doc['signatureImageSizeBytes'] === 'number'
         ? doc['signatureImageSizeBytes']
         : null;
+    const alignment =
+      doc['signatureBlockAlignment'] === 'LEFT' ||
+      doc['signatureBlockAlignment'] === 'CENTER' ||
+      doc['signatureBlockAlignment'] === 'RIGHT'
+        ? doc['signatureBlockAlignment']
+        : DEFAULT_SIGNATURE_ALIGNMENT;
 
     if (!signatureId && !signerName && !signatureImageS3Key) {
       return null;
@@ -764,6 +813,7 @@ export class DocumentsService {
       imageUrl,
       mimeType,
       sizeBytes,
+      alignment,
       signedAt: doc['signedAt'] ?? null,
       lockedAt: doc['lockedAt'] ?? null,
     };

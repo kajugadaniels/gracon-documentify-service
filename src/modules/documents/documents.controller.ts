@@ -7,9 +7,13 @@ import {
   Body,
   Param,
   Query,
+  Res,
+  Header,
   HttpCode,
   HttpStatus,
+  StreamableFile,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import {
   ApiTags,
   ApiBearerAuth,
@@ -20,6 +24,7 @@ import {
 } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { DocumentsService } from './documents.service';
+import { PdfExportService } from './pdf-export.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import {
   UpdateDocumentDto,
@@ -37,7 +42,10 @@ import type { RequestUser } from '../auth/interfaces/jwt-payload.interface';
 @ApiBearerAuth()
 @Controller('documents')
 export class DocumentsController {
-  constructor(private readonly service: DocumentsService) {}
+  constructor(
+    private readonly service: DocumentsService,
+    private readonly pdfExport: PdfExportService,
+  ) {}
 
   // ─── Create ────────────────────────────────────────────────────────────────
 
@@ -180,6 +188,33 @@ export class DocumentsController {
     @Body() dto: UpdateSignatureLayoutDto,
   ) {
     return this.service.updateSignatureLayout(user.userId, documentId, dto);
+  }
+
+  // ─── PDF export ────────────────────────────────────────────────────────────
+
+  @Get(':documentId/export/pdf')
+  @Header('Content-Type', 'application/pdf')
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiOperation({
+    summary: 'Export a locked document as a signed PDF.',
+    description:
+      'Generates an A4 PDF containing the document body and the signature strip ' +
+      'at the exact same normalized x/y position stored in the database, ' +
+      'giving identical placement to the HTML render.',
+  })
+  @ApiResponse({ status: 200, description: 'PDF buffer returned as attachment' })
+  @ApiResponse({ status: 403, description: 'Document is not yet locked or caller is not the owner' })
+  async exportPdf(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const buffer = await this.pdfExport.exportPdf(user.userId, documentId);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${documentId}-signed.pdf"`,
+    );
+    return new StreamableFile(buffer);
   }
 
   // ─── Versions ──────────────────────────────────────────────────────────────

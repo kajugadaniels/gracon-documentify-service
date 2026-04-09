@@ -44,7 +44,19 @@ const EMPTY_SPREADSHEET_CONTENT = {
   ],
 };
 
-const DEFAULT_SIGNATURE_ALIGNMENT = 'RIGHT';
+// Default position — bottom-right area of the A4 page (normalized 0–1)
+const DEFAULT_SIGNATURE_X = 0.57;
+const DEFAULT_SIGNATURE_Y = 0.78;
+
+// Backward-compat: derive x/y from old alignment enum for documents
+// that were locked before free placement was introduced.
+function alignmentToPosition(
+  alignment: string | null | undefined,
+): { x: number; y: number } {
+  if (alignment === 'LEFT') return { x: 0.02, y: DEFAULT_SIGNATURE_Y };
+  if (alignment === 'CENTER') return { x: 0.29, y: DEFAULT_SIGNATURE_Y };
+  return { x: DEFAULT_SIGNATURE_X, y: DEFAULT_SIGNATURE_Y };
+}
 
 @Injectable()
 export class DocumentsService {
@@ -428,7 +440,8 @@ export class DocumentsService {
         signatureImageS3Key: activeSignatureImage?.s3Key ?? null,
         signatureImageMimeType: activeSignatureImage?.mimeType ?? null,
         signatureImageSizeBytes: activeSignatureImage?.sizeBytes ?? null,
-        signatureBlockAlignment: DEFAULT_SIGNATURE_ALIGNMENT,
+        signatureBlockX: DEFAULT_SIGNATURE_X,
+        signatureBlockY: DEFAULT_SIGNATURE_Y,
       },
     });
 
@@ -496,8 +509,8 @@ export class DocumentsService {
     const updated = await this.prisma.document.update({
       where: { id: documentId },
       data: {
-        signatureBlockAlignment:
-          dto.alignment ?? document.signatureBlockAlignment ?? DEFAULT_SIGNATURE_ALIGNMENT,
+        signatureBlockX: dto.x ?? document.signatureBlockX ?? DEFAULT_SIGNATURE_X,
+        signatureBlockY: dto.y ?? document.signatureBlockY ?? DEFAULT_SIGNATURE_Y,
       },
     });
 
@@ -774,12 +787,16 @@ export class DocumentsService {
       typeof doc['signatureImageSizeBytes'] === 'number'
         ? doc['signatureImageSizeBytes']
         : null;
-    const alignment =
-      doc['signatureBlockAlignment'] === 'LEFT' ||
-      doc['signatureBlockAlignment'] === 'CENTER' ||
-      doc['signatureBlockAlignment'] === 'RIGHT'
-        ? doc['signatureBlockAlignment']
-        : DEFAULT_SIGNATURE_ALIGNMENT;
+    // Prefer stored x/y; fall back to position derived from legacy alignment enum.
+    const storedX = typeof doc['signatureBlockX'] === 'number' ? doc['signatureBlockX'] : null;
+    const storedY = typeof doc['signatureBlockY'] === 'number' ? doc['signatureBlockY'] : null;
+    const fallback = alignmentToPosition(
+      typeof doc['signatureBlockAlignment'] === 'string'
+        ? (doc['signatureBlockAlignment'] as string)
+        : null,
+    );
+    const x = storedX ?? fallback.x;
+    const y = storedY ?? fallback.y;
 
     if (!signatureId && !signerName && !signatureImageS3Key) {
       return null;
@@ -813,7 +830,8 @@ export class DocumentsService {
       imageUrl,
       mimeType,
       sizeBytes,
-      alignment,
+      x,
+      y,
       signedAt: doc['signedAt'] ?? null,
       lockedAt: doc['lockedAt'] ?? null,
     };

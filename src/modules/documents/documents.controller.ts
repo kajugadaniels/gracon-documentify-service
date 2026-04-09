@@ -30,7 +30,7 @@ import { LockDocumentDto } from './dto/lock-document.dto';
 import { QueryDocumentsDto } from './dto/query-documents.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
-import { RequestUser } from '../auth/interfaces/jwt-payload.interface';
+import type { RequestUser } from '../auth/interfaces/jwt-payload.interface';
 
 @ApiTags('Documents')
 @ApiBearerAuth()

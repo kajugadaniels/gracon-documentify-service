@@ -7,8 +7,9 @@ import { validateEnv } from './common/config/env.validation';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { S3Module } from './common/s3/s3.module';
 import { AuthModule } from './modules/auth/auth.module';
-
-// Feature modules added per step below
+import { DocumentsModule } from './modules/documents/documents.module';
+import { TemplatesModule } from './modules/templates/templates.module';
+import { FoldersModule } from './modules/folders/folders.module';
 
 @Module({
   imports: [
@@ -21,6 +22,9 @@ import { AuthModule } from './modules/auth/auth.module';
     PrismaModule,
     S3Module,
     AuthModule,
+    DocumentsModule,
+    TemplatesModule,
+    FoldersModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

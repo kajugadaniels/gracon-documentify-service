@@ -1,12 +1,25 @@
 /**
  * Seeds the document_templates table with the initial template library.
  * Run once after migration: npx ts-node src/seeds/templates.seed.ts
- * Safe to re-run — uses upsert on template name.
+ * Safe to re-run — updates an existing template matched by name.
  */
 
+import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { normalizeDatabaseUrl } from '../common/prisma/database-url.util';
 
-const prisma = new PrismaClient();
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
+  throw new Error('DATABASE_URL environment variable is not set');
+}
+
+const prisma = new PrismaClient({
+  adapter: new PrismaPg({
+    connectionString: normalizeDatabaseUrl(connectionString),
+  }),
+});
 
 const TEMPLATES = [
   {
@@ -560,14 +573,27 @@ async function main() {
   console.log('🌱 Seeding document templates…');
 
   for (const template of TEMPLATES) {
-    await prisma.documentTemplate.upsert({
-      where: { name: template.name } as never,
-      update: {
-        description: template.description,
-        contentJson: template.contentJson,
-      },
-      create: template as never,
+    const existingTemplate = await prisma.documentTemplate.findFirst({
+      where: { name: template.name },
+      select: { id: true },
     });
+
+    if (existingTemplate) {
+      await prisma.documentTemplate.update({
+        where: { id: existingTemplate.id },
+        data: {
+          description: template.description,
+          category: template.category as never,
+          type: template.type as never,
+          contentJson: template.contentJson as never,
+        },
+      });
+    } else {
+      await prisma.documentTemplate.create({
+        data: template as never,
+      });
+    }
+
     console.log(`  ✅ ${template.name}`);
   }
 

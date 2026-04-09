@@ -1,0 +1,934 @@
+// Prisma schema — ID Verification Platform
+// Run `npx prisma migrate dev` to apply changes
+// Run `npx prisma generate` to regenerate the TypeScript client
+// IMPORTANT: Only api/auth/ runs migrations — api/admin/ only runs `prisma generate`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+}
+
+// ─── Users ────────────────────────────────────────────────────────────────────
+model User {
+  id                   String    @id @default(uuid())
+  email                String    @unique
+  phoneNumber          String?
+  passwordHash         String
+  imageUrl             String?
+  isVerified           Boolean   @default(false)
+  isActive             Boolean   @default(false)
+  isIdVerified         Boolean   @default(false)
+  idVerifiedAt         DateTime?
+  verificationAttempts Int       @default(0)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  citizenIdentity        CitizenIdentity?
+  platformId             PlatformId?
+  emailVerificationToken EmailVerificationToken?
+  idVerifications        IdVerification[]
+  refreshTokens          RefreshToken[]
+  passwordResetTokens    PasswordResetToken[]
+  // Security events written by auth service — read by admin service
+  securityEvents         SecurityEventLog[]
+
+  // ── Query pattern indexes ──────────────────────────────────────────────────
+  // isActive and isIdVerified are boolean but queried with equality predicates
+  // + ORDER BY createdAt — compound indexes eliminate the sort step entirely.
+  // (isVerified, isIdVerified, createdAt) covers the "pending ID verification"
+  // filter (isVerified=true AND isIdVerified=false) which is the primary admin
+  // dashboard workflow. createdAt alone covers unfiltered paginated list queries.
+  @@index([createdAt])
+  @@index([isActive, createdAt])
+  @@index([isVerified, isIdVerified, createdAt])
+  @@map("users")
+  personalSignedDocuments PersonalSignedDocument[]
+  personalSignatureImages PersonalSignatureImage[]
+  personalKeyPairs PersonalKeyPair[]
+  personalCertificates PersonalCertificate[]
+  institutionMembers InstitutionMember[]
+  institutionStamps InstitutionStamp[]
+  signatureRequestsMade DocumentSignatureRequest[] @relation("SignatureRequestor")
+  documents Document[] @relation("DocumentOwner")
+  documentFolders DocumentFolder[]
+  documentCollaborators DocumentCollaborator[]
+  documentVersions DocumentVersion[]
+  documentComments DocumentComment[]
+  signatureRequestsReceived DocumentSignatureRequest[] @relation("SignatureRespondent")
+}
+
+// ─── Citizen Identities ───────────────────────────────────────────────────────
+model CitizenIdentity {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  nidEncrypted   String
+  nidHash        String   @unique
+  surName        String
+  postNames      String
+  sex            String
+  dateOfBirth    DateTime
+  countryOfBirth String
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("citizen_identities")
+}
+
+// ─── Platform IDs ─────────────────────────────────────────────────────────────
+model PlatformId {
+  id           String   @id @default(uuid())
+  userId       String   @unique
+  pidEncrypted String
+  pidHash      String   @unique
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("platform_ids")
+}
+
+// ─── Email Verification Tokens ────────────────────────────────────────────────
+model EmailVerificationToken {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  tokenHash String
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("email_verification_tokens")
+}
+
+// ─── Password Reset Tokens ────────────────────────────────────────────────────
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// ─── ID Verifications ─────────────────────────────────────────────────────────
+model IdVerification {
+  id             String   @id @default(uuid())
+  userId         String
+  attemptNumber  Int
+  documentMatch  Boolean
+  faceScore      Float
+  livenessScore  Float
+  compositeScore Float
+  passed         Boolean
+  failReason     String?
+  ipAddress      String?
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  // Stats queries: COUNT WHERE passed=? AND createdAt>=? — used by AdminStatsService
+  // for verificationsPassed / verificationsFailed counts with date windows
+  @@index([passed, createdAt])
+  @@map("id_verifications")
+}
+
+// ─── Refresh Tokens ───────────────────────────────────────────────────────────
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  tokenType String   @default("full")
+  expiresAt DateTime
+  revoked   Boolean  @default(false)
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ─── Security Event Log ───────────────────────────────────────────────────────
+// Written by api/auth/ on key security events.
+// Read-only by api/admin/ — gives admins real-time threat visibility.
+// userId is nullable — some events occur before a user is identified
+// (e.g. failed login with unknown email, rate limit exceeded).
+model SecurityEventLog {
+  id        String        @id @default(uuid())
+  userId    String?
+  eventType SecurityEvent
+  metadata  Json?         // IP, attempt count, user agent, any extra context
+  ipAddress String?
+  createdAt DateTime      @default(now())
+
+  // SetNull on delete — preserve the security log even if user is deactivated
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([eventType])
+  @@index([createdAt])
+  // Compound indexes — the single-column indexes above remain valid for queries
+  // without a date predicate. These cover the three high-frequency patterns:
+  // 1. Stats: WHERE eventType=? AND createdAt>=? (LOGIN_FAILED/RATE_LIMIT last 24h)
+  // 2. Admin user detail: WHERE userId=? ORDER BY createdAt DESC LIMIT 10
+  // 3. IP investigation: WHERE ipAddress=? ORDER BY createdAt DESC (brute-force workflow)
+  @@index([eventType, createdAt])
+  @@index([userId, createdAt])
+  @@index([ipAddress, createdAt])
+  @@map("security_event_logs")
+}
+
+enum SecurityEvent {
+  LOGIN_FAILED
+  LOGIN_SUCCESS
+  VERIFICATION_FAILED
+  VERIFICATION_PASSED
+  PASSWORD_RESET_REQUESTED
+  PASSWORD_CHANGED
+  SESSIONS_REVOKED_BY_USER
+  REVOKED_TOKEN_REUSE
+  RATE_LIMIT_EXCEEDED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DIGITAL SIGNATURE SERVICE TABLES (api/signature/)
+// These tables are owned by api/auth/ for migrations.
+// api/signature/ copies this schema and runs `prisma generate` only — never migrate.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── Personal Signature Images ────────────────────────────────────────────────
+// Stores the user's optional handwritten signature image reference in S3.
+// This is purely decorative — it has no cryptographic value.
+// The actual security lives in PersonalCertificate and PersonalSignedDocument.
+// One active image per user at all times (enforced by isActive flag).
+model PersonalSignatureImage {
+  id        String   @id @default(uuid())
+  userId    String                           // which user this belongs to
+  s3Key     String                           // private S3 object key — never exposed directly
+  mimeType  String                           // image/png or image/svg+xml only
+  sizeBytes Int                              // file size in bytes — max 2MB enforced at controller
+  isActive  Boolean  @default(true)          // false = soft-deleted, still in S3
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("personal_signature_images")
+}
+
+// ─── Personal Key Pairs ───────────────────────────────────────────────────────
+// Stores the user's cryptographic key pair.
+// CRITICAL: privateKeyEncrypted is AES-256-CBC encrypted using a key derived as:
+//   perUserKey = HMAC-SHA256(SIGNATURE_ENCRYPTION_SECRET, userId)
+// This means every user's private key is encrypted with a DIFFERENT key.
+// The plain private key NEVER touches the database — encrypted before storage.
+// In production (CloudHSM): privateKeyEncrypted will be null and keyHandle
+// will hold the HSM key reference instead.
+model PersonalKeyPair {
+  id                  String             @id @default(uuid())
+  userId              String                                    // which user owns this key pair
+  algorithm           PersonalKeyAlgorithm                      // RSA_2048 or ED25519
+  publicKey           String             @db.Text               // PEM format — stored plain
+  privateKeyEncrypted String?            @db.Text               // AES-256-CBC encrypted PEM (null if HSM)
+  keyHandle           String?                                   // CloudHSM key reference (null if software)
+  fingerprint         String                                    // SHA-256 of public key — for quick lookup
+  isActive            Boolean            @default(true)         // false when rotated
+  createdAt           DateTime           @default(now())
+
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  personalCertificate PersonalCertificate?
+
+  @@index([userId])
+  @@index([fingerprint])
+  @@map("personal_key_pairs")
+}
+
+enum PersonalKeyAlgorithm {
+  RSA_2048
+  ED25519
+}
+
+// ─── Personal Certificates ────────────────────────────────────────────────────
+// X.509 digital certificate issued to a verified individual user.
+// Binds the user's verified identity (from citizen_identities) to their public key.
+// Self-signed in development. CA-signed in production.
+// Subject fields are populated from the citizen_identities table at issuance time.
+// Once revoked, a certificate CANNOT be un-revoked — it is permanent.
+model PersonalCertificate {
+  id              String    @id @default(uuid())
+  userId          String                                    // which user holds this certificate
+  keyPairId       String    @unique                         // which key pair this cert is tied to
+  serialNumber    String    @unique                         // UUID — used for CRL and OCSP
+  // Subject stored as flat fields for queryability — also embedded in certificatePem
+  subjectCN       String                                   // CN = "FirstName LastName" (from NIDA data)
+  subjectO        String    @default("ID Verification Platform")
+  subjectC        String    @default("RW")
+  subjectUserId   String                                   // SAN = userId — ties cert to platform account
+  notBefore       DateTime                                 // certificate validity start
+  notAfter        DateTime                                 // certificate validity end (2 years default)
+  certificatePem  String    @db.Text                       // full X.509 PEM — what third parties verify
+  isRevoked       Boolean   @default(false)
+  revokedAt       DateTime?
+  revokedReason   String?                                  // required when revoking
+  createdAt       DateTime  @default(now())
+
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  keyPair     PersonalKeyPair @relation(fields: [keyPairId], references: [id])
+  signedDocs  PersonalSignedDocument[]
+  verifications PersonalSignatureVerification[]
+
+  @@index([userId])
+  @@index([serialNumber])
+  @@index([notAfter])
+  @@map("personal_certificates")
+}
+
+// ─── Personal Signed Documents ────────────────────────────────────────────────
+// Immutable audit trail of every document signing event.
+// Records are NEVER deleted — they are the legal proof of signing.
+// documentHash is the SHA-256 of the original document (computed by the caller).
+// signatureBytes is the base64-encoded cryptographic signature.
+// The document itself is never stored here — only its hash.
+model PersonalSignedDocument {
+  id             String   @id @default(uuid())
+  userId         String                         // who signed
+  certificateId  String                         // which certificate was active at signing time
+  documentName   String                         // human-readable name provided by caller
+  documentHash   String                         // SHA-256 hex of the document — 64 chars
+  signatureBytes String   @db.Text              // base64-encoded cryptographic signature
+  metadata       Json?                          // optional: page count, document type, etc.
+  signedAt       DateTime @default(now())       // server-side timestamp — never client-provided
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  certificate PersonalCertificate @relation(fields: [certificateId], references: [id])
+
+  @@index([userId])
+  @@index([certificateId])
+  @@index([documentHash])
+  @@index([signedAt])
+  @@map("personal_signed_documents")
+}
+
+// ─── Personal Signature Verifications ────────────────────────────────────────
+// Log of every verification request — whether the endpoint is public or authenticated.
+// verifiedByUserId is null when a third party (unauthenticated) calls /verify.
+// This gives full auditability of who checked whose signatures and when.
+model PersonalSignatureVerification {
+  id                String    @id @default(uuid())
+  certificateId     String                         // whose certificate was verified
+  verifiedByUserId  String?                        // null = public/third-party verification
+  documentHash      String                         // the hash that was submitted for checking
+  result            Boolean                        // true = valid, false = invalid/tampered
+  failReason        String?                        // why it failed if result = false
+  ipAddress         String?
+  createdAt         DateTime  @default(now())
+
+  certificate PersonalCertificate @relation(fields: [certificateId], references: [id])
+
+  @@index([certificateId])
+  @@index([createdAt])
+  @@map("personal_signature_verifications")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DIGITAL STAMP SERVICE TABLES (api/stamp/)
+// These tables are owned by api/auth/ for migrations.
+// api/stamp/ copies this schema and runs `prisma generate` only — never migrate.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── Institutions ─────────────────────────────────────────────────────────────
+// An institution is any organisation registered on Gracon 360 with the ability
+// to issue institutional stamps. Examples: companies, NGOs, government agencies.
+// Institutions are created by SUPER_ADMIN only — never self-registered.
+// registrationNumber is the official RDB (Rwanda Development Board) company number.
+model Institution {
+  id                 String              @id @default(uuid())
+  name               String                                    // official full legal name
+  type               InstitutionType                           // COMPANY, NGO, GOVERNMENT, OTHER
+  registrationNumber String              @unique               // RDB or equivalent registration number
+  country            String              @default("RW")
+  isActive           Boolean             @default(true)        // SUPER_ADMIN can deactivate
+  createdByAdminId   String?                                   // which SUPER_ADMIN created this
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  members            InstitutionMember[]
+  keyPairs           InstitutionKeyPair[]
+  certificates       InstitutionCertificate[]
+  stampImages        InstitutionStampImage[]
+  resolutions        AuthorityResolution[]
+  stamps             InstitutionStamp[]
+
+  @@index([registrationNumber])
+  @@map("institutions")
+}
+
+enum InstitutionType {
+  COMPANY
+  NGO
+  GOVERNMENT
+  OTHER
+}
+
+// ─── Institution Members ──────────────────────────────────────────────────────
+// Maps a verified individual user to an institution.
+// A user can be a member of multiple institutions.
+// stampAuthority: true means this member can perform stamp operations.
+// Only an institution admin (hasAdminRole = true) can grant stampAuthority.
+// Authority is always traced back to an AuthorityResolution.
+model InstitutionMember {
+  id               String    @id @default(uuid())
+  userId           String                         // verified user who is a member
+  institutionId    String                         // which institution
+  roleTitle        String                         // e.g. "Finance Director", "CEO"
+  hasAdminRole     Boolean   @default(false)      // can manage this institution's members
+  stampAuthority   Boolean   @default(false)      // can perform stamp operations
+  resolutionId     String?                        // which AuthorityResolution grants stamp authority
+  isActive         Boolean   @default(true)       // false = membership revoked
+  addedByUserId    String?                        // which institution admin added this member
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  institution Institution        @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  resolution  AuthorityResolution? @relation(fields: [resolutionId], references: [id])
+
+  // Unique: one active membership record per user per institution
+  @@unique([userId, institutionId])
+  @@index([institutionId])
+  @@index([userId])
+  @@map("institution_members")
+}
+
+// ─── Authority Resolutions ────────────────────────────────────────────────────
+// A board resolution that formally grants stamp authority within an institution.
+// Every stamp must trace back to a valid, active resolution.
+// Resolutions can be revoked — revoking one immediately blocks all members
+// whose stampAuthority depended on this resolution.
+// Resolutions are NEVER deleted — they form part of the legal audit chain.
+model AuthorityResolution {
+  id            String    @id @default(uuid())
+  institutionId String                         // which institution this resolution belongs to
+  title         String                         // e.g. "Board Resolution 2026-Q1-001"
+  scope         String                         // what this resolution authorises (free text)
+  grantedBy     String                         // name/title of the authority who granted this
+  isActive      Boolean   @default(true)       // false = revoked — members using this lose authority
+  revokedAt     DateTime?
+  revokedReason String?
+  validFrom     DateTime                       // resolution effective date
+  validUntil    DateTime?                      // null = no expiry, otherwise explicit end date
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  institution Institution        @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  members     InstitutionMember[]
+  stamps      InstitutionStamp[]
+
+  @@index([institutionId])
+  @@map("authority_resolutions")
+}
+
+// ─── Institution Stamp Images ─────────────────────────────────────────────────
+// The institutional stamp image — company seal, logo, or official mark.
+// Same pattern as PersonalSignatureImage — purely decorative, no crypto value.
+// One active stamp image per institution at all times.
+model InstitutionStampImage {
+  id            String    @id @default(uuid())
+  institutionId String                         // which institution
+  s3Key         String                         // private S3 key — never exposed directly
+  mimeType      String                         // image/png or image/svg+xml only
+  sizeBytes     Int
+  isActive      Boolean   @default(true)
+  uploadedByUserId String?                     // which institution admin uploaded this
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  institution Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  @@index([institutionId])
+  @@map("institution_stamp_images")
+}
+
+// ─── Institution Key Pairs ────────────────────────────────────────────────────
+// The institution's own cryptographic key pair — separate from any individual user's keys.
+// Encryption pattern mirrors PersonalKeyPair:
+//   perInstitutionKey = HMAC-SHA256(STAMP_ENCRYPTION_SECRET, institutionId)
+//   privateKeyEncrypted = AES-256-CBC(privateKeyPEM, perInstitutionKey)
+// In production (CloudHSM): privateKeyEncrypted = null, keyHandle = HSM reference.
+model InstitutionKeyPair {
+  id                  String                  @id @default(uuid())
+  institutionId       String                                         // which institution owns this
+  algorithm           InstitutionKeyAlgorithm                        // RSA_2048 or ED25519
+  publicKey           String                  @db.Text               // PEM — stored plain
+  privateKeyEncrypted String?                 @db.Text               // AES-256-CBC encrypted (null if HSM)
+  keyHandle           String?                                        // CloudHSM key reference
+  fingerprint         String                                         // SHA-256 of public key
+  isActive            Boolean                 @default(true)         // false when rotated
+  generatedByUserId   String?                                        // which institution admin generated
+  createdAt           DateTime                @default(now())
+
+  institution            Institution             @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  institutionCertificate InstitutionCertificate?
+
+  @@index([institutionId])
+  @@map("institution_key_pairs")
+}
+
+enum InstitutionKeyAlgorithm {
+  RSA_2048
+  ED25519
+}
+
+// ─── Institution Certificates ─────────────────────────────────────────────────
+// X.509 digital certificate for an institution — proves the institution's identity.
+// Subject fields reflect the institution, not an individual:
+//   CN = Institution full legal name
+//   O  = "ID Verification Platform"
+//   OU = "Institutional Certificate"
+//   C  = "RW"
+//   SAN = institutionId
+// The institution certificate is the second signature verified in every stamp check.
+model InstitutionCertificate {
+  id              String    @id @default(uuid())
+  institutionId   String                         // which institution holds this certificate
+  keyPairId       String    @unique              // which institution key pair this cert is tied to
+  serialNumber    String    @unique              // UUID — for CRL and OCSP
+  subjectCN       String                         // CN = institution name
+  subjectO        String    @default("ID Verification Platform")
+  subjectOU       String    @default("Institutional Certificate")
+  subjectC        String    @default("RW")
+  subjectInstId   String                         // SAN = institutionId
+  notBefore       DateTime
+  notAfter        DateTime
+  certificatePem  String    @db.Text
+  isRevoked       Boolean   @default(false)
+  revokedAt       DateTime?
+  revokedReason   String?
+  issuedByAdminId String?                        // which admin triggered issuance
+  createdAt       DateTime  @default(now())
+
+  institution   Institution        @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  keyPair       InstitutionKeyPair @relation(fields: [keyPairId], references: [id])
+  stamps        InstitutionStamp[]
+
+  @@index([institutionId])
+  @@index([serialNumber])
+  @@map("institution_certificates")
+}
+
+// ─── Institution Stamps ───────────────────────────────────────────────────────
+// The core stamp record. Each stamp produces TWO independent cryptographic signatures:
+//   1. institutionSignatureBytes — signed by institution's private key
+//   2. userSignatureBytes — signed by the individual user's personal private key
+// Both signatures cover the SAME documentHash.
+// Both must be valid for the stamp to be trusted by any verifier.
+// personalCertificateId links to the user's PersonalCertificate at time of stamping.
+// institutionCertificateId links to the institution's certificate at time of stamping.
+// Records are NEVER deleted — they are the legal proof of institutional action.
+model InstitutionStamp {
+  id                       String    @id @default(uuid())
+  institutionId            String                         // which institution stamped
+  userId                   String                         // which individual performed the stamp
+  memberId                 String                         // which InstitutionMember record authorised this
+  resolutionId             String                         // which AuthorityResolution backed this action
+  institutionCertificateId String                         // institution cert used for stamp 1
+  personalCertificateId    String                         // user's personal cert used for stamp 2
+  documentName             String                         // human-readable name
+  documentHash             String                         // SHA-256 hex of the document
+  institutionSignatureBytes String   @db.Text              // base64 — institution's crypto signature
+  userSignatureBytes        String   @db.Text              // base64 — individual's crypto signature
+  roleTitle                String                         // role at time of stamping — snapshot
+  metadata                 Json?                          // optional extra context
+  stampedAt                DateTime  @default(now())      // server-side timestamp
+
+  institution            Institution            @relation(fields: [institutionId], references: [id])
+  user                   User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  resolution             AuthorityResolution    @relation(fields: [resolutionId], references: [id])
+  institutionCertificate InstitutionCertificate @relation(fields: [institutionCertificateId], references: [id])
+
+  @@index([institutionId])
+  @@index([userId])
+  @@index([documentHash])
+  @@index([stampedAt])
+  @@map("institution_stamps")
+}
+
+// ─── Institution Stamp Verifications ─────────────────────────────────────────
+// Log of every stamp verification request — authenticated or public.
+// Both signature bytes and both verification results are recorded independently
+// so that partial failures (e.g. institution sig valid but user sig invalid) are auditable.
+model InstitutionStampVerification {
+  id                       String    @id @default(uuid())
+  institutionCertificateId String                         // institution cert that was checked
+  personalCertificateId    String                         // personal cert that was checked
+  verifiedByUserId         String?                        // null = public/third-party
+  documentHash             String
+  institutionSigValid      Boolean                        // was the institution signature valid?
+  userSigValid             Boolean                        // was the user signature valid?
+  result                   Boolean                        // true only if BOTH are valid
+  failReason               String?
+  ipAddress                String?
+  createdAt                DateTime  @default(now())
+
+  @@index([institutionCertificateId])
+  @@index([personalCertificateId])
+  @@index([createdAt])
+  @@map("institution_stamp_verifications")
+}
+
+// ─── Admins ───────────────────────────────────────────────────────────────────
+// Completely separate from users table.
+// SUPER_ADMIN: created via Prisma seed script only — never through any API.
+// ADMIN: created by a logged-in SUPER_ADMIN through the admin panel.
+// passwordHash is null until admin accepts their invite and sets a password.
+model Admin {
+  id           String    @id @default(uuid())
+  firstName    String
+  lastName     String
+  email        String    @unique
+  phoneNumber  String?
+  passwordHash String?   // null until invite is accepted and password is set
+  role         AdminRole @default(ADMIN)
+  isVerified   Boolean   @default(false) // true after invite link is accepted
+  isActive     Boolean   @default(true)  // SUPER_ADMIN can deactivate an admin
+  createdById  String?   // which SUPER_ADMIN created this admin (null for seeded)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  // Self-referential relation — tracks who created whom
+  createdBy     Admin?  @relation("AdminCreatedBy", fields: [createdById], references: [id])
+  createdAdmins Admin[] @relation("AdminCreatedBy")
+
+  adminRefreshTokens AdminRefreshToken[]
+  adminInviteToken   AdminInviteToken?
+  auditLogs          AdminAuditLog[]
+
+  @@map("admins")
+}
+
+enum AdminRole {
+  ADMIN
+  SUPER_ADMIN
+}
+
+// ─── Admin Refresh Tokens ─────────────────────────────────────────────────────
+// Separate from user refresh tokens — never mixed.
+// Signed with ADMIN_JWT_SECRET, not JWT_SECRET.
+model AdminRefreshToken {
+  id        String   @id @default(uuid())
+  adminId   String
+  tokenHash String   @unique
+  expiresAt DateTime
+  revoked   Boolean  @default(false)
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  admin Admin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@map("admin_refresh_tokens")
+}
+
+// ─── Admin Invite Tokens ──────────────────────────────────────────────────────
+// Sent to new admins via email when SUPER_ADMIN creates their account.
+// Raw token lives only in the email link — hash stored in DB.
+// Admin uses this to set their password and activate their account.
+// 48-hour expiry — longer than user verification to account for time zones.
+model AdminInviteToken {
+  id        String   @id @default(uuid())
+  adminId   String   @unique // one active invite per admin at a time
+  tokenHash String   @unique
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  admin Admin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@map("admin_invite_tokens")
+}
+
+// ─── Admin Audit Log ──────────────────────────────────────────────────────────
+// Every admin action is recorded here — immutable audit trail.
+// Never deleted — even deactivated admins' actions are preserved.
+// metadata field stores context: reason, old value, new value, etc.
+model AdminAuditLog {
+  id           String      @id @default(uuid())
+  adminId      String
+  action       AdminAction
+  targetUserId String?     // which user was affected (null for non-user actions)
+  metadata     Json?       // structured context for this specific action
+  ipAddress    String?
+  createdAt    DateTime    @default(now())
+
+  admin Admin @relation(fields: [adminId], references: [id])
+
+  @@index([adminId])
+  @@index([targetUserId])
+  @@index([createdAt])
+  @@index([action])
+  @@map("admin_audit_logs")
+}
+
+enum AdminAction {
+  // User account actions
+  USER_DEACTIVATED
+  USER_REACTIVATED
+  SESSIONS_REVOKED
+  ID_STATUS_CHANGED
+
+  // Sensitive data access — always logged
+  NID_DECRYPTED
+  PID_DECRYPTED
+  USER_DETAIL_VIEWED
+
+  // Admin management
+  ADMIN_CREATED
+  ADMIN_DEACTIVATED
+  ADMIN_REACTIVATED
+  ADMIN_INVITE_RESENT
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DOCUMENT SERVICE TABLES (api/documents/)
+// Owned by api/auth/ for migrations.
+// api/documents/ copies this schema and runs `prisma generate` only — never migrate.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── Documents ────────────────────────────────────────────────────────────────
+// The core document record. Content is stored in S3 as JSON (editor state).
+// A document moves through a strict lifecycle: DRAFT → FINALISED → SIGNED → LOCKED.
+// Once LOCKED no fields can be modified — this is enforced at service level.
+// The contentHash is computed at finalisation time and verified at signing time.
+// If content has changed between finalise and sign, the service rejects the sign.
+model Document {
+  id              String          @id @default(uuid())
+  ownerId         String                               // verified user who created this
+  title           String          @default("Untitled Document")
+  type            DocumentType                         // RICH_TEXT or SPREADSHEET
+  status          DocumentStatus  @default(DRAFT)
+  folderId        String?                              // optional folder organisation
+  tags            String[]        @default([])         // user-assigned tags
+  s3ContentKey    String?                              // S3 key for editor JSON state
+  s3PdfKey        String?                              // S3 key for rendered PDF (set after signing)
+  contentHash     String?                              // SHA-256 of content JSON at finalisation
+  wordCount       Int             @default(0)          // updated on each autosave
+  isDeleted       Boolean         @default(false)      // soft delete — never hard delete
+  deletedAt       DateTime?
+  // Signing references — set when document is signed
+  personalSignedDocumentId  String?   @unique          // FK to personal_signed_documents
+  institutionStampId        String?   @unique          // FK to institution_stamps (optional stamp)
+  // Timestamps
+  finalisedAt     DateTime?                            // when DRAFT → FINALISED
+  signedAt        DateTime?                            // when FINALISED → SIGNED
+  lockedAt        DateTime?                            // when SIGNED → LOCKED
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  owner         User                    @relation("DocumentOwner",       fields: [ownerId],   references: [id], onDelete: Cascade)
+  folder        DocumentFolder?         @relation(fields: [folderId],   references: [id],    onDelete: SetNull)
+  collaborators DocumentCollaborator[]
+  versions      DocumentVersion[]
+  comments      DocumentComment[]
+  signatureRequests DocumentSignatureRequest[]
+
+  @@index([ownerId])
+  @@index([status])
+  @@index([folderId])
+  @@index([createdAt])
+  @@map("documents")
+}
+
+enum DocumentType {
+  RICH_TEXT
+  SPREADSHEET
+}
+
+enum DocumentStatus {
+  DRAFT        // Being edited — content can change
+  FINALISED    // Content frozen — hash computed — awaiting signatures
+  SIGNED       // All required signatures collected
+  LOCKED       // Permanently immutable — PDF generated
+}
+
+// ─── Document Folders ────────────────────────────────────────────────────────
+// Users organise their documents into folders.
+// Folders can be nested one level deep (a folder can have a parentFolderId).
+// Folders are never shared — they belong to one user only.
+model DocumentFolder {
+  id            String    @id @default(uuid())
+  ownerId       String
+  name          String    @db.VarChar(255)
+  parentFolderId String?                            // one level of nesting only
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  owner         User               @relation(fields: [ownerId],        references: [id], onDelete: Cascade)
+  parentFolder  DocumentFolder?    @relation("FolderNesting", fields: [parentFolderId], references: [id])
+  subFolders    DocumentFolder[]   @relation("FolderNesting")
+  documents     Document[]
+
+  @@index([ownerId])
+  @@map("document_folders")
+}
+
+// ─── Document Collaborators ───────────────────────────────────────────────────
+// Maps a verified user to a document they did not create.
+// VIEWER can read and comment. EDITOR can read, comment, and edit.
+// SIGNER is a user who is required to sign before the document can be LOCKED.
+// A document owner is never in this table — they are always the owner.
+// Collaborators are always ID-verified users — unverified users cannot be added.
+model DocumentCollaborator {
+  id           String               @id @default(uuid())
+  documentId   String
+  userId       String
+  role         CollaboratorRole                         // VIEWER, EDITOR, SIGNER
+  invitedAt    DateTime             @default(now())
+  acceptedAt   DateTime?                                // null = invitation pending
+  isActive     Boolean              @default(true)
+
+  document     Document             @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user         User                 @relation(fields: [userId],     references: [id], onDelete: Cascade)
+
+  @@unique([documentId, userId])
+  @@index([documentId])
+  @@index([userId])
+  @@map("document_collaborators")
+}
+
+enum CollaboratorRole {
+  VIEWER
+  EDITOR
+  SIGNER    // Must sign before document can be locked
+}
+
+// ─── Document Versions ───────────────────────────────────────────────────────
+// Every autosave creates a new version record with a snapshot of the content.
+// Versions are stored in S3. The current content is always at document.s3ContentKey.
+// Versions allow the user to roll back to any previous state while the document
+// is still in DRAFT status. Once FINALISED, new versions cannot be created.
+model DocumentVersion {
+  id            String    @id @default(uuid())
+  documentId    String
+  versionNumber Int                                    // 1, 2, 3 … increments per document
+  s3Key         String                                 // S3 key for this version's content JSON
+  wordCount     Int       @default(0)
+  savedById     String                                 // which user triggered this save
+  createdAt     DateTime  @default(now())
+
+  document      Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  savedBy       User      @relation(fields: [savedById],  references: [id])
+
+  @@unique([documentId, versionNumber])
+  @@index([documentId])
+  @@map("document_versions")
+}
+
+// ─── Document Comments ────────────────────────────────────────────────────────
+// Inline comments tied to a position in the document.
+// anchorText: the text the comment is anchored to (for display).
+// resolvedAt: set when the owner marks the comment resolved.
+// Replies are stored as comments with a parentCommentId.
+model DocumentComment {
+  id              String    @id @default(uuid())
+  documentId      String
+  authorId        String
+  parentCommentId String?                              // null = top-level, set = reply
+  anchorText      String?   @db.Text                  // text selection the comment is on
+  content         String    @db.Text
+  resolvedAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  document        Document          @relation(fields: [documentId],      references: [id], onDelete: Cascade)
+  author          User              @relation(fields: [authorId],        references: [id])
+  parentComment   DocumentComment?  @relation("CommentReplies", fields: [parentCommentId], references: [id])
+  replies         DocumentComment[] @relation("CommentReplies")
+
+  @@index([documentId])
+  @@index([authorId])
+  @@map("document_comments")
+}
+
+// ─── Document Signature Requests ──────────────────────────────────────────────
+// When a document owner requests a signature from another verified user.
+// The document cannot be LOCKED until all pending requests are fulfilled.
+// status: PENDING → SIGNED or DECLINED.
+model DocumentSignatureRequest {
+  id              String                       @id @default(uuid())
+  documentId      String
+  requestedById   String                                              // the document owner
+  requestedUserId String                                              // the user asked to sign
+  status          SignatureRequestStatus        @default(PENDING)
+  message         String?                      @db.Text              // optional note from owner
+  declinedReason  String?
+  // Set when the user actually signs
+  personalSignedDocumentId String?             @unique
+  signedAt        DateTime?
+  createdAt       DateTime                     @default(now())
+  updatedAt       DateTime                     @updatedAt
+
+  document        Document  @relation(fields: [documentId],      references: [id], onDelete: Cascade)
+  requestedBy     User      @relation("SignatureRequestor", fields: [requestedById],   references: [id])
+  requestedUser   User      @relation("SignatureRespondent", fields: [requestedUserId], references: [id])
+
+  @@index([documentId])
+  @@index([requestedUserId])
+  @@map("document_signature_requests")
+}
+
+enum SignatureRequestStatus {
+  PENDING
+  SIGNED
+  DECLINED
+}
+
+// ─── Document Templates ───────────────────────────────────────────────────────
+// Pre-built document structures that users can use to create new documents quickly.
+// Templates are seeded by the platform — users cannot create their own in Phase A.
+// contentJson: the Tiptap JSON structure with placeholder variables.
+// Variables are replaced at document creation time:
+//   {{USER_FULL_NAME}} → user's first + last name from NIDA data
+//   {{USER_PLATFORM_ID}} → user's Platform ID
+//   {{DATE}} → current date
+//   {{INSTITUTION_NAME}} → institution name (for institutional templates)
+model DocumentTemplate {
+  id            String              @id @default(uuid())
+  name          String              @db.VarChar(255)
+  description   String              @db.Text
+  category      TemplateCategory
+  type          DocumentType                              // RICH_TEXT or SPREADSHEET
+  contentJson   Json                                     // Tiptap JSON with placeholders
+  isPublic      Boolean             @default(true)       // false = platform-admin only
+  usageCount    Int                 @default(0)          // incremented on each use
+  previewS3Key  String?                                  // S3 key for preview image
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([category])
+  @@index([type])
+  @@map("document_templates")
+}
+
+enum TemplateCategory {
+  CONTRACT         // Service agreements, employment contracts
+  LEGAL            // NDAs, affidavits, power of attorney
+  FINANCIAL        // Invoices, receipts, loan agreements
+  CORRESPONDENCE   // Letters, memos, official communications
+  RESOLUTION       // Board resolutions, meeting minutes
+  OTHER
+}

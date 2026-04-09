@@ -225,6 +225,8 @@ export class DocumentsService {
       }
     }
 
+    result['signatureSnapshot'] = await this.buildSignatureSnapshot(document);
+
     return result;
   }
 
@@ -385,6 +387,32 @@ export class DocumentsService {
       );
     }
 
+    const [activeSignatureImage, signer] = await Promise.all([
+      this.prisma.personalSignatureImage.findFirst({
+        where: { userId, isActive: true },
+        select: {
+          s3Key: true,
+          mimeType: true,
+          sizeBytes: true,
+        },
+      }),
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          citizenIdentity: {
+            select: {
+              surName: true,
+              postNames: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    const signerDisplayName =
+      `${signer?.citizenIdentity?.postNames ?? ''} ${signer?.citizenIdentity?.surName ?? ''}`.trim() ||
+      null;
+
     // Lock the document
     const updated = await this.prisma.document.update({
       where: { id: documentId },
@@ -393,11 +421,19 @@ export class DocumentsService {
         personalSignedDocumentId: dto.signatureId,
         signedAt: signedDoc.signedAt,
         lockedAt: new Date(),
+        signerDisplayName,
+        signatureImageS3Key: activeSignatureImage?.s3Key ?? null,
+        signatureImageMimeType: activeSignatureImage?.mimeType ?? null,
+        signatureImageSizeBytes: activeSignatureImage?.sizeBytes ?? null,
       },
     });
 
     return {
       ...this.formatDocument(updated),
+      signatureSnapshot: await this.buildSignatureSnapshot(
+        updated,
+        signedDoc.certificateId,
+      ),
       signatureId: dto.signatureId,
       message: 'Document locked. It is now permanently immutable.',
     };
@@ -492,6 +528,10 @@ export class DocumentsService {
         status: true,
         contentHash: true,
         personalSignedDocumentId: true,
+        signerDisplayName: true,
+        signatureImageS3Key: true,
+        signatureImageMimeType: true,
+        signatureImageSizeBytes: true,
         signedAt: true,
         lockedAt: true,
         owner: {
@@ -526,7 +566,9 @@ export class DocumentsService {
       title: document.title,
       contentHash: document.contentHash,
       signedBy: {
-        name: `${document.owner?.citizenIdentity?.postNames ?? ''} ${document.owner?.citizenIdentity?.surName ?? ''}`.trim(),
+        name:
+          document.signerDisplayName ??
+          `${document.owner?.citizenIdentity?.postNames ?? ''} ${document.owner?.citizenIdentity?.surName ?? ''}`.trim(),
       },
       signedAt: document.signedAt,
       lockedAt: document.lockedAt,
@@ -660,6 +702,70 @@ export class DocumentsService {
       finalisedAt: doc['finalisedAt'],
       signedAt: doc['signedAt'],
       lockedAt: doc['lockedAt'],
+      signatureSnapshot: null,
+    };
+  }
+
+  private async buildSignatureSnapshot(
+    doc: Record<string, unknown>,
+    certificateId?: string | null,
+  ) {
+    const signatureId =
+      typeof doc['personalSignedDocumentId'] === 'string'
+        ? doc['personalSignedDocumentId']
+        : null;
+    const signerName =
+      typeof doc['signerDisplayName'] === 'string' &&
+      doc['signerDisplayName'].trim()
+        ? doc['signerDisplayName']
+        : null;
+    const signatureImageS3Key =
+      typeof doc['signatureImageS3Key'] === 'string'
+        ? doc['signatureImageS3Key']
+        : null;
+    const mimeType =
+      typeof doc['signatureImageMimeType'] === 'string'
+        ? doc['signatureImageMimeType']
+        : null;
+    const sizeBytes =
+      typeof doc['signatureImageSizeBytes'] === 'number'
+        ? doc['signatureImageSizeBytes']
+        : null;
+
+    if (!signatureId && !signerName && !signatureImageS3Key) {
+      return null;
+    }
+
+    let resolvedCertificateId = certificateId ?? null;
+
+    if (!resolvedCertificateId && signatureId) {
+      const signedDoc = await this.prisma.personalSignedDocument.findUnique({
+        where: { id: signatureId },
+        select: { certificateId: true },
+      });
+      resolvedCertificateId = signedDoc?.certificateId ?? null;
+    }
+
+    let imageUrl: string | null = null;
+    if (signatureImageS3Key) {
+      try {
+        imageUrl = await this.s3.getPresignedUrl(signatureImageS3Key, 3600);
+      } catch (error) {
+        this.logger.warn(
+          `Failed to create signature snapshot URL for key ${signatureImageS3Key}: ${String(error)}`,
+        );
+      }
+    }
+
+    return {
+      signatureId,
+      certificateId: resolvedCertificateId,
+      signerName,
+      imageUrl,
+      mimeType,
+      sizeBytes,
+      signedAt: doc['signedAt'] ?? null,
+      lockedAt: doc['lockedAt'] ?? null,
     };
   }
 }

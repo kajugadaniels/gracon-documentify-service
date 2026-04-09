@@ -192,7 +192,12 @@ export class DocumentsService {
       include: {
         collaborators: {
           where: { isActive: true },
-          select: { userId: true, role: true, acceptedAt: true },
+          select: {
+            userId: true,
+            isActive: true,
+            role: true,
+            acceptedAt: true,
+          },
         },
         signatureRequests: {
           select: { requestedUserId: true, status: true },

@@ -44,6 +44,10 @@ class EnvironmentVariables {
   @IsNotEmpty()
   FRONTEND_URL: string;
 
+  @IsOptional()
+  @IsString()
+  FRONTEND_URLS?: string;
+
   @Transform(({ value }) => parseInt(value, 10))
   @IsOptional()
   @IsNumber()

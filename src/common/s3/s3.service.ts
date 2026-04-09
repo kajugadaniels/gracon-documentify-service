@@ -80,6 +80,19 @@ export class S3Service {
     }
   }
 
+  /** Fetches a raw binary object from S3 as a Buffer. Used by PDF export to embed images. */
+  async getBuffer(key: string): Promise<Buffer> {
+    try {
+      const result = await this.s3
+        .getObject({ Bucket: this.bucket, Key: key })
+        .promise();
+      return result.Body as Buffer;
+    } catch (err) {
+      this.logger.error(`S3 getBuffer failed for key ${key}`, err);
+      throw new InternalServerErrorException('Failed to retrieve file from storage.');
+    }
+  }
+
   async getPresignedUrl(key: string, expiresInSeconds = 3600): Promise<string> {
     return this.s3.getSignedUrlPromise('getObject', {
       Bucket: this.bucket,

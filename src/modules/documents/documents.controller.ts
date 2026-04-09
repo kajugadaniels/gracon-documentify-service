@@ -24,6 +24,7 @@ import { CreateDocumentDto } from './dto/create-document.dto';
 import {
   UpdateDocumentDto,
   AutosaveDocumentDto,
+  UpdateSignatureLayoutDto,
 } from './dto/update-document.dto';
 import { FinaliseDocumentDto } from './dto/finalise-document.dto';
 import { LockDocumentDto } from './dto/lock-document.dto';
@@ -164,6 +165,21 @@ export class DocumentsController {
     @Body() dto: LockDocumentDto,
   ) {
     return this.service.lock(user.userId, documentId, dto);
+  }
+
+  @Patch(':documentId/signature-layout')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiOperation({
+    summary:
+      'Adjust the visual placement of the frozen signature strip on a locked document.',
+  })
+  updateSignatureLayout(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+    @Body() dto: UpdateSignatureLayoutDto,
+  ) {
+    return this.service.updateSignatureLayout(user.userId, documentId, dto);
   }
 
   // ─── Versions ──────────────────────────────────────────────────────────────

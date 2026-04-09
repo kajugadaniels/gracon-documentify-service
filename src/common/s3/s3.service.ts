@@ -18,7 +18,7 @@ export class S3Service {
       accessKeyId: config.get<string>('AWS_ACCESS_KEY_ID'),
       secretAccessKey: config.get<string>('AWS_SECRET_ACCESS_KEY'),
     });
-    this.bucket = config.get<string>('AWS_S3_BUCKET_NAME');
+    this.bucket = config.getOrThrow<string>('AWS_S3_BUCKET_NAME');
   }
 
   async putJson(key: string, data: unknown): Promise<void> {

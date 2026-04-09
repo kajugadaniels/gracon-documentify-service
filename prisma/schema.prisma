@@ -731,7 +731,9 @@ model Document {
   signatureImageS3Key    String?                      // immutable signature image snapshot key taken at lock time
   signatureImageMimeType String?                      // snapshot mime type for display fidelity
   signatureImageSizeBytes Int?                        // snapshot file size for UI/debugging
-  signatureBlockAlignment String?                     // presentation alignment for the signed strip on the rendered paper
+  signatureBlockAlignment String?                     // kept for backward compat with records created before free placement
+  signatureBlockX         Float?                       // normalized x position of signature strip (0.0 = left edge, 1.0 = right edge)
+  signatureBlockY         Float?                       // normalized y position of signature strip (0.0 = top, 1.0 = bottom)
   isDeleted       Boolean         @default(false)      // soft delete — never hard delete
   deletedAt       DateTime?
   // Signing references — set when document is signed

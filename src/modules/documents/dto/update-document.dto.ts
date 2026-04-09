@@ -4,7 +4,9 @@ import {
   MaxLength,
   IsArray,
   IsObject,
-  IsIn,
+  IsNumber,
+  Min,
+  Max,
 } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -37,11 +39,26 @@ export class AutosaveDocumentDto {
 
 export class UpdateSignatureLayoutDto {
   @ApiPropertyOptional({
-    description: 'Horizontal placement of the signature strip on the rendered document.',
-    enum: ['LEFT', 'CENTER', 'RIGHT'],
+    description:
+      'Normalized horizontal position of the signature strip (0.0 = left edge, 1.0 = right edge).',
+    minimum: 0,
+    maximum: 1,
   })
   @IsOptional()
-  @IsString()
-  @IsIn(['LEFT', 'CENTER', 'RIGHT'])
-  alignment?: 'LEFT' | 'CENTER' | 'RIGHT';
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  x?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Normalized vertical position of the signature strip (0.0 = top, 1.0 = bottom).',
+    minimum: 0,
+    maximum: 1,
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  y?: number;
 }

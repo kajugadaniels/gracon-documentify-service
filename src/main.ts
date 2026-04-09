@@ -6,6 +6,7 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 import { ThrottlerExceptionFilter } from './common/filters/throttler-exception.filter';
+import { buildCorsConfig } from './common/security/cors.config';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -15,10 +16,12 @@ async function bootstrap() {
 
   app.use(helmet());
   app.setGlobalPrefix('api/v1');
-  app.enableCors({
-    origin: config.get<string>('FRONTEND_URL'),
-    credentials: true,
-  });
+  app.enableCors(
+    buildCorsConfig(
+      config.get<string>('FRONTEND_URL', 'http://localhost:4002'),
+      config.get<string>('FRONTEND_URLS'),
+    ),
+  );
 
   app.useGlobalFilters(
     new GlobalExceptionFilter(),

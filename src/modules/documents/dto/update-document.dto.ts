@@ -4,6 +4,7 @@ import {
   MaxLength,
   IsArray,
   IsObject,
+  IsIn,
 } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -32,4 +33,15 @@ export class AutosaveDocumentDto {
   @ApiPropertyOptional({ description: 'Word/cell count at time of save.' })
   @IsOptional()
   wordCount?: number;
+}
+
+export class UpdateSignatureLayoutDto {
+  @ApiPropertyOptional({
+    description: 'Horizontal placement of the signature strip on the rendered document.',
+    enum: ['LEFT', 'CENTER', 'RIGHT'],
+  })
+  @IsOptional()
+  @IsString()
+  @IsIn(['LEFT', 'CENTER', 'RIGHT'])
+  alignment?: 'LEFT' | 'CENTER' | 'RIGHT';
 }

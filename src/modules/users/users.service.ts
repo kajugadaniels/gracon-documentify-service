@@ -9,7 +9,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 
-export type UserSearchMode = 'email' | 'id';
+export type UserSearchMode = 'email' | 'platformId' | 'citizenId';
 
 const PLATFORM_ID_LENGTH = 11;
 const CITIZEN_ID_LENGTH = 16;
@@ -56,34 +56,56 @@ export class UsersService {
     const normalizedQuery = query.trim();
 
     if (mode === 'email') {
-      const users = await this.prisma.user.findMany({
-        where: {
-          isActive: true,
-          isVerified: true,
-          email: { contains: normalizedQuery, mode: 'insensitive' },
-        },
-        select: {
-          id: true,
-          email: true,
-          imageUrl: true,
-          citizenIdentity: {
-            select: { surName: true, postNames: true },
-          },
-        },
-        take: safeLimit,
-        orderBy: { email: 'asc' },
-      });
-
-      return users.map((u) => ({
-        id: u.id,
-        email: u.email,
-        surName: u.citizenIdentity?.surName ?? null,
-        postNames: u.citizenIdentity?.postNames ?? null,
-        imageUrl: u.imageUrl ?? null,
-        matchedBy: 'EMAIL',
-      }));
+      return this.searchByEmail(normalizedQuery, safeLimit);
     }
 
+    return this.searchByNumericIdentifier(normalizedQuery, mode, safeLimit);
+  }
+
+  /**
+   * Returns verified users whose email partially matches the given query.
+   */
+  private async searchByEmail(
+    query: string,
+    limit: number,
+  ): Promise<UserSearchResult[]> {
+    const users = await this.prisma.user.findMany({
+      where: {
+        isActive: true,
+        isVerified: true,
+        email: { contains: query, mode: 'insensitive' },
+      },
+      select: {
+        id: true,
+        email: true,
+        imageUrl: true,
+        citizenIdentity: {
+          select: { surName: true, postNames: true },
+        },
+      },
+      take: limit,
+      orderBy: { email: 'asc' },
+    });
+
+    return users.map((u) => ({
+      id: u.id,
+      email: u.email,
+      surName: u.citizenIdentity?.surName ?? null,
+      postNames: u.citizenIdentity?.postNames ?? null,
+      imageUrl: u.imageUrl ?? null,
+      matchedBy: 'EMAIL',
+    }));
+  }
+
+  /**
+   * Returns verified users whose decrypted platform ID or citizen ID exactly
+   * matches the given numeric query for the selected mode.
+   */
+  private async searchByNumericIdentifier(
+    query: string,
+    mode: Exclude<UserSearchMode, 'email'>,
+    limit: number,
+  ): Promise<UserSearchResult[]> {
     const users = await this.prisma.user.findMany({
       where: {
         isActive: true,
@@ -106,7 +128,7 @@ export class UsersService {
 
     return users
       .map((u) => {
-        const matchedBy = this.matchNumericIdentifier(normalizedQuery, u);
+        const matchedBy = this.matchNumericIdentifier(query, mode, u);
 
         if (!matchedBy) {
           return null;
@@ -122,20 +144,15 @@ export class UsersService {
         };
       })
       .filter((user): user is UserSearchResult => Boolean(user))
-      .slice(0, safeLimit)
+      .slice(0, limit)
       .sort((a, b) => {
-        if (a.matchedBy === b.matchedBy) {
-          return a.email.localeCompare(b.email);
-        }
-
-        if (b.matchedBy === 'EMAIL') return -1;
-        if (a.matchedBy === 'EMAIL') return 1;
         return a.email.localeCompare(b.email);
       });
   }
 
   private matchNumericIdentifier(
     query: string,
+    mode: Exclude<UserSearchMode, 'email'>,
     user: {
       platformId: { pidEncrypted: string } | null;
       citizenIdentity:
@@ -143,7 +160,11 @@ export class UsersService {
         | null;
     },
   ): UserSearchResult['matchedBy'] | null {
-    if (query.length === PLATFORM_ID_LENGTH && user.platformId?.pidEncrypted) {
+    if (
+      mode === 'platformId' &&
+      query.length === PLATFORM_ID_LENGTH &&
+      user.platformId?.pidEncrypted
+    ) {
       try {
         const pid = this.encryption.decrypt(user.platformId.pidEncrypted);
         if (pid === query) {
@@ -157,6 +178,7 @@ export class UsersService {
     }
 
     if (
+      mode === 'citizenId' &&
       query.length === CITIZEN_ID_LENGTH &&
       user.citizenIdentity?.nidEncrypted
     ) {

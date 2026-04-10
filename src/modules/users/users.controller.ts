@@ -43,12 +43,13 @@ export class UsersController {
   @HttpCode(HttpStatus.OK)
   @Throttle({ general: { limit: 60, ttl: 60_000 } })
   @ApiOperation({
-    summary: 'Search users by email or exact numeric ID',
+    summary: 'Search users by email, platform ID, or citizen ID',
     description:
       'Returns active, verified users whose email contains the query string, ' +
       'or whose decrypted platform ID / citizen ID exactly matches the query. ' +
-      'Email search requires at least 5 characters. Numeric-ID search requires ' +
-      'the full identifier: 11 digits for Platform ID or 16 digits for Citizen ID. ' +
+      'Email search requires at least 5 characters. Platform-ID search requires ' +
+      `the full ${PLATFORM_ID_LENGTH}-digit identifier. Citizen-ID search requires ` +
+      `the full ${CITIZEN_ID_LENGTH}-digit identifier. ` +
       'Only safe display fields are returned — no passwords, NIDs, or tokens.\n\n' +
       'The caller must explicitly choose the search mode so the API can apply ' +
       'the correct validation rules.\n\n' +
@@ -57,12 +58,13 @@ export class UsersController {
   @ApiQuery({
     name: 'q',
     description:
-      'Partial email, or a full numeric Platform ID / Citizen ID depending on mode.',
+      'Partial email, full Platform ID, or full Citizen ID depending on mode.',
     example: 'john@',
   })
   @ApiQuery({
     name: 'mode',
-    description: 'Search mode: `email` for partial email lookup, `id` for exact numeric ID lookup.',
+    description:
+      'Search mode: `email`, `platformId`, or `citizenId`.',
     example: 'email',
   })
   @ApiResponse({
@@ -81,7 +83,11 @@ export class UsersController {
       ],
     },
   })
-  @ApiResponse({ status: 400, description: 'Query must be at least 5 characters.' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Invalid search mode, too-short email query, or wrong identifier format/length.',
+  })
   @ApiResponse({ status: 401, description: 'Unauthorized — token missing or expired.' })
   @ApiResponse({ status: 403, description: 'Forbidden — identity verification required.' })
   async searchUsers(
@@ -93,10 +99,11 @@ export class UsersController {
 
     if (
       normalizedMode !== 'email' &&
-      normalizedMode !== 'id'
+      normalizedMode !== 'platformid' &&
+      normalizedMode !== 'citizenid'
     ) {
       throw new BadRequestException(
-        'Search mode must be either "email" or "id".',
+        'Search mode must be "email", "platformId", or "citizenId".',
       );
     }
 
@@ -120,17 +127,30 @@ export class UsersController {
     }
 
     if (
-      normalizedQuery.length !== PLATFORM_ID_LENGTH &&
+      normalizedMode === 'platformid' &&
+      normalizedQuery.length !== PLATFORM_ID_LENGTH
+    ) {
+      throw new BadRequestException(
+        `Platform ID search requires the full ${PLATFORM_ID_LENGTH}-digit identifier.`,
+      );
+    }
+
+    if (
+      normalizedMode === 'citizenid' &&
       normalizedQuery.length !== CITIZEN_ID_LENGTH
     ) {
       throw new BadRequestException(
-        `Numeric ID search requires the full Platform ID (${PLATFORM_ID_LENGTH} digits) or Citizen ID (${CITIZEN_ID_LENGTH} digits).`,
+        `Citizen ID search requires the full ${CITIZEN_ID_LENGTH}-digit identifier.`,
       );
     }
 
     return this.usersService.searchUsers(
       normalizedQuery,
-      normalizedMode as UserSearchMode,
+      (normalizedMode === 'platformid'
+        ? 'platformId'
+        : normalizedMode === 'citizenid'
+          ? 'citizenId'
+          : normalizedMode) as UserSearchMode,
     );
   }
 }

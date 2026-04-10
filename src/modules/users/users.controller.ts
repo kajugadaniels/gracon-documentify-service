@@ -41,16 +41,20 @@ export class UsersController {
   @HttpCode(HttpStatus.OK)
   @Throttle({ general: { limit: 60, ttl: 60_000 } })
   @ApiOperation({
-    summary: 'Search users by partial email',
+    summary: 'Search users by email, platform ID, or citizen ID',
     description:
-      'Returns active, verified users whose email contains the query string. ' +
+      'Returns active, verified users whose email contains the query string, ' +
+      'or whose platform ID / citizen ID exactly matches the query. ' +
       'A minimum of 5 characters is required to prevent broad enumeration. ' +
       'Only safe display fields are returned — no passwords, NIDs, or tokens.\n\n' +
+      'Platform and citizen IDs are stored as SHA-256 hashes, so those two ' +
+      'search modes require the full exact identifier, while email remains a partial match.\n\n' +
       '**Authentication:** Full JWT access token required (VerifiedUserGuard).',
   })
   @ApiQuery({
     name: 'q',
-    description: 'Partial email string to search — must be at least 5 characters.',
+    description:
+      'Partial email, or a full platform ID / citizen ID. Must be at least 5 characters.',
     example: 'john@',
   })
   @ApiResponse({
@@ -64,6 +68,7 @@ export class UsersController {
           surName: 'DOE',
           postNames: 'John',
           imageUrl: null,
+          matchedBy: 'EMAIL',
         },
       ],
     },

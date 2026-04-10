@@ -2,14 +2,15 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
-import { ThrottlerGuard } from '@nestjs/throttler';
 import { validateEnv } from './common/config/env.validation';
+import { CustomThrottlerGuard } from './common/guards/throttler.guard';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { S3Module } from './common/s3/s3.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { DocumentsModule } from './modules/documents/documents.module';
 import { TemplatesModule } from './modules/templates/templates.module';
 import { FoldersModule } from './modules/folders/folders.module';
+import { UsersModule } from './modules/users/users.module';
 
 @Module({
   imports: [
@@ -25,7 +26,8 @@ import { FoldersModule } from './modules/folders/folders.module';
     DocumentsModule,
     TemplatesModule,
     FoldersModule,
+    UsersModule,
   ],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [{ provide: APP_GUARD, useClass: CustomThrottlerGuard }],
 })
 export class AppModule {}

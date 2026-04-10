@@ -7,13 +7,14 @@ import {
   Body,
   Param,
   Query,
+  Req,
   Res,
   Header,
   HttpCode,
   HttpStatus,
   StreamableFile,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import {
   ApiTags,
   ApiBearerAuth,
@@ -34,6 +35,10 @@ import {
 import { FinaliseDocumentDto } from './dto/finalise-document.dto';
 import { LockDocumentDto } from './dto/lock-document.dto';
 import { QueryDocumentsDto } from './dto/query-documents.dto';
+import {
+  ShareDocumentAccessDto,
+  UpdateDocumentAccessDto,
+} from './dto/manage-access.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import type { RequestUser } from '../auth/interfaces/jwt-payload.interface';
@@ -114,6 +119,94 @@ export class DocumentsController {
       documentId,
       includeContent !== 'false',
     );
+  }
+
+  // ─── Access management ────────────────────────────────────────────────────
+
+  @Get(':documentId/access')
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiOperation({
+    summary:
+      'List current collaborators and pending invitations for a document.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Access list returned for an owner or manage-access collaborator.',
+  })
+  getAccessList(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+  ) {
+    return this.service.getAccessList(user.userId, documentId);
+  }
+
+  @Post(':documentId/access')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiOperation({
+    summary:
+      'Create or refresh a document invitation with an explicit permission set.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Invitation created or existing access updated.',
+  })
+  shareAccess(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+    @Body() dto: ShareDocumentAccessDto,
+    @Req() req: Request,
+  ) {
+    return this.service.shareAccess(user.userId, documentId, dto, {
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') ?? null,
+    });
+  }
+
+  @Patch(':documentId/access/:collaboratorId')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiParam({ name: 'collaboratorId', type: String })
+  @ApiOperation({
+    summary:
+      'Update the permission set for an existing collaborator or pending invitation.',
+  })
+  updateAccess(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+    @Param('collaboratorId') collaboratorId: string,
+    @Body() dto: UpdateDocumentAccessDto,
+    @Req() req: Request,
+  ) {
+    return this.service.updateAccess(
+      user.userId,
+      documentId,
+      collaboratorId,
+      dto,
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') ?? null,
+      },
+    );
+  }
+
+  @Delete(':documentId/access/:collaboratorId')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiParam({ name: 'collaboratorId', type: String })
+  @ApiOperation({
+    summary: 'Revoke a collaborator or pending invitation from a document.',
+  })
+  revokeAccess(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+    @Param('collaboratorId') collaboratorId: string,
+    @Req() req: Request,
+  ) {
+    return this.service.revokeAccess(user.userId, documentId, collaboratorId, {
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') ?? null,
+    });
   }
 
   // ─── Autosave ──────────────────────────────────────────────────────────────

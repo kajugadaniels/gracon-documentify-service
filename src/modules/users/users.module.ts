@@ -6,11 +6,12 @@
  */
 
 import { Module } from '@nestjs/common';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
 
 @Module({
   controllers: [UsersController],
-  providers: [UsersService],
+  providers: [UsersService, EncryptionService],
 })
 export class UsersModule {}

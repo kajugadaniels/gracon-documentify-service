@@ -22,10 +22,12 @@ import {
   ApiResponse,
 } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import { UsersService } from './users.service';
+import { UsersService, type UserSearchMode } from './users.service';
 
 /** Minimum query length to prevent broad email enumeration. */
 const MIN_QUERY_LEN = 5;
+const PLATFORM_ID_LENGTH = 11;
+const CITIZEN_ID_LENGTH = 16;
 
 @ApiTags('Users')
 @ApiBearerAuth()
@@ -41,21 +43,27 @@ export class UsersController {
   @HttpCode(HttpStatus.OK)
   @Throttle({ general: { limit: 60, ttl: 60_000 } })
   @ApiOperation({
-    summary: 'Search users by email, platform ID, or citizen ID',
+    summary: 'Search users by email or exact numeric ID',
     description:
       'Returns active, verified users whose email contains the query string, ' +
-      'or whose platform ID / citizen ID exactly matches the query. ' +
-      'A minimum of 5 characters is required to prevent broad enumeration. ' +
+      'or whose decrypted platform ID / citizen ID exactly matches the query. ' +
+      'Email search requires at least 5 characters. Numeric-ID search requires ' +
+      'the full identifier: 11 digits for Platform ID or 16 digits for Citizen ID. ' +
       'Only safe display fields are returned — no passwords, NIDs, or tokens.\n\n' +
-      'Platform and citizen IDs are stored as SHA-256 hashes, so those two ' +
-      'search modes require the full exact identifier, while email remains a partial match.\n\n' +
+      'The caller must explicitly choose the search mode so the API can apply ' +
+      'the correct validation rules.\n\n' +
       '**Authentication:** Full JWT access token required (VerifiedUserGuard).',
   })
   @ApiQuery({
     name: 'q',
     description:
-      'Partial email, or a full platform ID / citizen ID. Must be at least 5 characters.',
+      'Partial email, or a full numeric Platform ID / Citizen ID depending on mode.',
     example: 'john@',
+  })
+  @ApiQuery({
+    name: 'mode',
+    description: 'Search mode: `email` for partial email lookup, `id` for exact numeric ID lookup.',
+    example: 'email',
   })
   @ApiResponse({
     status: 200,
@@ -76,12 +84,53 @@ export class UsersController {
   @ApiResponse({ status: 400, description: 'Query must be at least 5 characters.' })
   @ApiResponse({ status: 401, description: 'Unauthorized — token missing or expired.' })
   @ApiResponse({ status: 403, description: 'Forbidden — identity verification required.' })
-  async searchUsers(@Query('q') q: string) {
-    if (!q || q.trim().length < MIN_QUERY_LEN) {
+  async searchUsers(
+    @Query('q') q: string,
+    @Query('mode') mode: string,
+  ) {
+    const normalizedQuery = q?.trim() ?? '';
+    const normalizedMode = mode?.trim().toLowerCase();
+
+    if (
+      normalizedMode !== 'email' &&
+      normalizedMode !== 'id'
+    ) {
       throw new BadRequestException(
-        `Search query must be at least ${MIN_QUERY_LEN} characters.`,
+        'Search mode must be either "email" or "id".',
       );
     }
-    return this.usersService.searchUsers(q.trim());
+
+    if (normalizedMode === 'email') {
+      if (normalizedQuery.length < MIN_QUERY_LEN) {
+        throw new BadRequestException(
+          `Email search must be at least ${MIN_QUERY_LEN} characters.`,
+        );
+      }
+
+      return this.usersService.searchUsers(
+        normalizedQuery,
+        normalizedMode as UserSearchMode,
+      );
+    }
+
+    if (!/^\d+$/.test(normalizedQuery)) {
+      throw new BadRequestException(
+        'Numeric ID search only accepts digits.',
+      );
+    }
+
+    if (
+      normalizedQuery.length !== PLATFORM_ID_LENGTH &&
+      normalizedQuery.length !== CITIZEN_ID_LENGTH
+    ) {
+      throw new BadRequestException(
+        `Numeric ID search requires the full Platform ID (${PLATFORM_ID_LENGTH} digits) or Citizen ID (${CITIZEN_ID_LENGTH} digits).`,
+      );
+    }
+
+    return this.usersService.searchUsers(
+      normalizedQuery,
+      normalizedMode as UserSearchMode,
+    );
   }
 }

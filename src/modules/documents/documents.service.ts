@@ -6,6 +6,13 @@ import {
   ConflictException,
   Logger,
 } from '@nestjs/common';
+import {
+  CollaboratorInvitationStatus,
+  CollaboratorPermission,
+  CollaboratorRole,
+  DocumentAccessAuditEvent,
+  Prisma,
+} from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { S3Service } from '../../common/s3/s3.service';
@@ -23,6 +30,11 @@ import {
 import { FinaliseDocumentDto } from './dto/finalise-document.dto';
 import { LockDocumentDto } from './dto/lock-document.dto';
 import { QueryDocumentsDto } from './dto/query-documents.dto';
+import {
+  ShareDocumentAccessDto,
+  UpdateDocumentAccessDto,
+  type CollaboratorPermissionValue,
+} from './dto/manage-access.dto';
 
 // Default empty Tiptap document structure
 const EMPTY_RICH_TEXT_CONTENT = {
@@ -47,6 +59,48 @@ const EMPTY_SPREADSHEET_CONTENT = {
 // Default position — bottom-right area of the A4 page (normalized 0–1)
 const DEFAULT_SIGNATURE_X = 0.57;
 const DEFAULT_SIGNATURE_Y = 0.78;
+const DEFAULT_INVITATION_EXPIRY_DAYS = 7;
+const CANONICAL_PERMISSION_ORDER: CollaboratorPermission[] = [
+  CollaboratorPermission.READ,
+  CollaboratorPermission.COMMENT,
+  CollaboratorPermission.SIGN,
+  CollaboratorPermission.EDIT,
+  CollaboratorPermission.MANAGE_ACCESS,
+];
+
+type AccessAuditContext = {
+  ipAddress?: string | null;
+  userAgent?: string | null;
+};
+
+type CollaboratorAccessRecord = {
+  id: string;
+  userId: string;
+  role: CollaboratorRole;
+  permissions: CollaboratorPermission[];
+  invitationStatus: CollaboratorInvitationStatus;
+  invitedAt: Date;
+  acceptedAt: Date | null;
+  declinedAt: Date | null;
+  revokedAt: Date | null;
+  note: string | null;
+  isActive: boolean;
+};
+
+type CollaboratorWithProfile = CollaboratorAccessRecord & {
+  user: {
+    email: string;
+    imageUrl: string | null;
+    citizenIdentity: {
+      surName: string;
+      postNames: string;
+    } | null;
+  };
+  invitedBy: {
+    id: string;
+    email: string;
+  } | null;
+};
 
 // Backward-compat: derive x/y from old alignment enum for documents
 // that were locked before free placement was introduced.
@@ -155,19 +209,13 @@ export class DocumentsService {
   async makeCopy(userId: string, documentId: string) {
     const source = await this.prisma.document.findUnique({
       where: { id: documentId },
-      include: {
-        collaborators: {
-          where: { isActive: true },
-          select: { userId: true, isActive: true },
-        },
-      },
     });
 
     if (!source || source.isDeleted) {
       throw new NotFoundException('Document not found.');
     }
 
-    this.assertDocumentAccess(userId, source);
+    await this.assertCanRead(userId, documentId, source.ownerId);
 
     const content = source.s3ContentKey
       ? await this.s3.getJson(source.s3ContentKey)
@@ -258,12 +306,33 @@ export class DocumentsService {
       where: { id: documentId },
       include: {
         collaborators: {
-          where: { isActive: true },
           select: {
+            id: true,
             userId: true,
-            isActive: true,
             role: true,
+            permissions: true,
+            invitationStatus: true,
+            invitedAt: true,
+            isActive: true,
             acceptedAt: true,
+            declinedAt: true,
+            revokedAt: true,
+            note: true,
+            user: {
+              select: {
+                email: true,
+                imageUrl: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
+              },
+            },
+            invitedBy: {
+              select: {
+                id: true,
+                email: true,
+              },
+            },
           },
         },
         signatureRequests: {
@@ -276,10 +345,21 @@ export class DocumentsService {
       throw new NotFoundException('Document not found.');
     }
 
-    // Access check — owner or active collaborator
-    this.assertDocumentAccess(userId, document);
+    await this.assertCanRead(userId, documentId, document.ownerId);
 
     const result: Record<string, unknown> = this.formatDocument(document);
+    const canManageAccess =
+      document.ownerId === userId ||
+      (await this.hasCollaboratorPermission(
+        userId,
+        documentId,
+        CollaboratorPermission.MANAGE_ACCESS,
+      ));
+    result['collaborators'] = canManageAccess
+      ? document.collaborators.map((collaborator) =>
+          this.formatCollaboratorAccess(collaborator),
+        )
+      : [];
 
     // Fetch content from S3 if requested and key exists
     if (includeContent && document.s3ContentKey) {
@@ -295,6 +375,433 @@ export class DocumentsService {
     result['signatureSnapshot'] = await this.buildSignatureSnapshot(document);
 
     return result;
+  }
+
+  async getAccessList(userId: string, documentId: string) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      select: {
+        id: true,
+        ownerId: true,
+        title: true,
+        isDeleted: true,
+        collaborators: {
+          orderBy: { invitedAt: 'desc' },
+          select: {
+            id: true,
+            userId: true,
+            role: true,
+            permissions: true,
+            invitationStatus: true,
+            invitedAt: true,
+            acceptedAt: true,
+            declinedAt: true,
+            revokedAt: true,
+            note: true,
+            isActive: true,
+            user: {
+              select: {
+                email: true,
+                imageUrl: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
+              },
+            },
+            invitedBy: {
+              select: {
+                id: true,
+                email: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    await this.assertCanManageAccess(userId, documentId, document.ownerId);
+
+    return {
+      documentId: document.id,
+      title: document.title,
+      collaborators: document.collaborators.map((collaborator) =>
+        this.formatCollaboratorAccess(collaborator),
+      ),
+    };
+  }
+
+  async shareAccess(
+    actorUserId: string,
+    documentId: string,
+    dto: ShareDocumentAccessDto,
+    context: AccessAuditContext = {},
+  ) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      select: { id: true, ownerId: true, isDeleted: true },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    await this.assertCanManageAccess(actorUserId, documentId, document.ownerId);
+    const actorIsOwner = actorUserId === document.ownerId;
+
+    if (dto.userId === document.ownerId) {
+      throw new BadRequestException(
+        'The document owner already has full control and cannot be invited.',
+      );
+    }
+
+    const recipient = await this.prisma.user.findUnique({
+      where: { id: dto.userId },
+      select: {
+        id: true,
+        email: true,
+        isActive: true,
+        isVerified: true,
+        imageUrl: true,
+        citizenIdentity: {
+          select: { surName: true, postNames: true },
+        },
+      },
+    });
+
+    if (!recipient || !recipient.isActive || !recipient.isVerified) {
+      throw new NotFoundException(
+        'Recipient not found or not eligible for collaboration.',
+      );
+    }
+
+    const permissions = this.normalizePermissions(dto.permissions);
+    if (!actorIsOwner && permissions.includes(CollaboratorPermission.MANAGE_ACCESS)) {
+      throw new ForbiddenException(
+        'Only the document owner can grant manage-access permission.',
+      );
+    }
+
+    const role = this.deriveLegacyRole(permissions);
+    const invitationExpiresAt = this.buildInvitationExpiry(dto.expiresInDays);
+
+    const existing = await this.prisma.documentCollaborator.findUnique({
+      where: { documentId_userId: { documentId, userId: dto.userId } },
+      select: {
+        id: true,
+        userId: true,
+        permissions: true,
+        invitationStatus: true,
+        acceptedAt: true,
+        isActive: true,
+      },
+    });
+
+    if (!actorIsOwner && dto.userId === actorUserId) {
+      throw new ForbiddenException(
+        'You cannot change your own document access level.',
+      );
+    }
+
+    if (
+      !actorIsOwner &&
+      existing?.permissions.includes(CollaboratorPermission.MANAGE_ACCESS)
+    ) {
+      throw new ForbiddenException(
+        'Only the document owner can modify another access manager.',
+      );
+    }
+
+    const saved = existing
+      ? await this.prisma.documentCollaborator.update({
+          where: { id: existing.id },
+          data: {
+            role,
+            permissions,
+            invitedByUserId: actorUserId,
+            invitationStatus: existing.acceptedAt
+              ? CollaboratorInvitationStatus.ACCEPTED
+              : CollaboratorInvitationStatus.PENDING,
+            invitationExpiresAt,
+            invitedAt: new Date(),
+            note: dto.note?.trim() || null,
+            declinedAt: null,
+            revokedAt: null,
+            invitationOpenedAt: null,
+            invitationEmailSentAt: null,
+            invitationTokenHash: null,
+            acceptedAt: existing.acceptedAt,
+            isActive: existing.acceptedAt ? true : false,
+          },
+          select: {
+            id: true,
+            userId: true,
+            role: true,
+            permissions: true,
+            invitationStatus: true,
+            invitedAt: true,
+            acceptedAt: true,
+            declinedAt: true,
+            revokedAt: true,
+            note: true,
+            isActive: true,
+            user: {
+              select: {
+                email: true,
+                imageUrl: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
+              },
+            },
+            invitedBy: {
+              select: {
+                id: true,
+                email: true,
+              },
+            },
+          },
+        })
+      : await this.prisma.documentCollaborator.create({
+          data: {
+            documentId,
+            userId: dto.userId,
+            role,
+            permissions,
+            invitedByUserId: actorUserId,
+            invitationStatus: CollaboratorInvitationStatus.PENDING,
+            invitationExpiresAt,
+            note: dto.note?.trim() || null,
+          },
+          select: {
+            id: true,
+            userId: true,
+            role: true,
+            permissions: true,
+            invitationStatus: true,
+            invitedAt: true,
+            acceptedAt: true,
+            declinedAt: true,
+            revokedAt: true,
+            note: true,
+            isActive: true,
+            user: {
+              select: {
+                email: true,
+                imageUrl: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
+              },
+            },
+            invitedBy: {
+              select: {
+                id: true,
+                email: true,
+              },
+            },
+          },
+        });
+
+    await this.recordAccessAudit({
+      documentId,
+      collaboratorId: saved.id,
+      actorUserId,
+      targetUserId: dto.userId,
+      eventType: existing?.acceptedAt
+        ? DocumentAccessAuditEvent.PERMISSIONS_UPDATED
+        : DocumentAccessAuditEvent.INVITE_CREATED,
+      fromPermissions: existing?.permissions ?? [],
+      toPermissions: permissions,
+      invitationStatus: saved.invitationStatus,
+      metadata: {
+        notePresent: Boolean(dto.note?.trim()),
+        expiresAt: invitationExpiresAt.toISOString(),
+      },
+      ...context,
+    });
+
+    return this.formatCollaboratorAccess(saved);
+  }
+
+  async updateAccess(
+    actorUserId: string,
+    documentId: string,
+    collaboratorId: string,
+    dto: UpdateDocumentAccessDto,
+    context: AccessAuditContext = {},
+  ) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      select: { id: true, ownerId: true, isDeleted: true },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    await this.assertCanManageAccess(actorUserId, documentId, document.ownerId);
+    const actorIsOwner = actorUserId === document.ownerId;
+
+    const collaborator = await this.prisma.documentCollaborator.findFirst({
+      where: { id: collaboratorId, documentId },
+      select: {
+        id: true,
+        userId: true,
+        permissions: true,
+        acceptedAt: true,
+        invitationStatus: true,
+      },
+    });
+
+    if (!collaborator) {
+      throw new NotFoundException('Collaborator not found.');
+    }
+
+    const permissions = this.normalizePermissions(dto.permissions);
+    if (!actorIsOwner && collaborator.userId === actorUserId) {
+      throw new ForbiddenException(
+        'You cannot change your own document access level.',
+      );
+    }
+
+    if (!actorIsOwner) {
+      const touchesManageAccess =
+        collaborator.permissions.includes(CollaboratorPermission.MANAGE_ACCESS) ||
+        permissions.includes(CollaboratorPermission.MANAGE_ACCESS);
+
+      if (touchesManageAccess) {
+        throw new ForbiddenException(
+          'Only the document owner can grant or modify manage-access permission.',
+        );
+      }
+    }
+
+    const updated = await this.prisma.documentCollaborator.update({
+      where: { id: collaborator.id },
+      data: {
+        role: this.deriveLegacyRole(permissions),
+        permissions,
+      },
+      select: {
+        id: true,
+        userId: true,
+        role: true,
+        permissions: true,
+        invitationStatus: true,
+        invitedAt: true,
+        acceptedAt: true,
+        declinedAt: true,
+        revokedAt: true,
+        note: true,
+        isActive: true,
+        user: {
+          select: {
+            email: true,
+            imageUrl: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+        invitedBy: {
+          select: {
+            id: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    await this.recordAccessAudit({
+      documentId,
+      collaboratorId: collaborator.id,
+      actorUserId,
+      targetUserId: collaborator.userId,
+      eventType: DocumentAccessAuditEvent.PERMISSIONS_UPDATED,
+      fromPermissions: collaborator.permissions,
+      toPermissions: permissions,
+      invitationStatus: collaborator.invitationStatus,
+      metadata: {
+        accepted: Boolean(collaborator.acceptedAt),
+      },
+      ...context,
+    });
+
+    return this.formatCollaboratorAccess(updated);
+  }
+
+  async revokeAccess(
+    actorUserId: string,
+    documentId: string,
+    collaboratorId: string,
+    context: AccessAuditContext = {},
+  ) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      select: { id: true, ownerId: true, isDeleted: true },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    await this.assertCanManageAccess(actorUserId, documentId, document.ownerId);
+    const actorIsOwner = actorUserId === document.ownerId;
+
+    const collaborator = await this.prisma.documentCollaborator.findFirst({
+      where: { id: collaboratorId, documentId },
+      select: {
+        id: true,
+        userId: true,
+        permissions: true,
+        invitationStatus: true,
+      },
+    });
+
+    if (!collaborator) {
+      throw new NotFoundException('Collaborator not found.');
+    }
+
+    if (!actorIsOwner && collaborator.userId === actorUserId) {
+      throw new ForbiddenException('You cannot revoke your own access.');
+    }
+
+    if (
+      !actorIsOwner &&
+      collaborator.permissions.includes(CollaboratorPermission.MANAGE_ACCESS)
+    ) {
+      throw new ForbiddenException(
+        'Only the document owner can revoke another access manager.',
+      );
+    }
+
+    await this.prisma.documentCollaborator.update({
+      where: { id: collaborator.id },
+      data: {
+        isActive: false,
+        invitationStatus: CollaboratorInvitationStatus.REVOKED,
+        revokedAt: new Date(),
+      },
+    });
+
+    await this.recordAccessAudit({
+      documentId,
+      collaboratorId: collaborator.id,
+      actorUserId,
+      targetUserId: collaborator.userId,
+      eventType: DocumentAccessAuditEvent.INVITE_REVOKED,
+      fromPermissions: collaborator.permissions,
+      toPermissions: collaborator.permissions,
+      invitationStatus: CollaboratorInvitationStatus.REVOKED,
+      metadata: null,
+      ...context,
+    });
+
+    return { revoked: true, collaboratorId: collaborator.id };
   }
 
   // ─── Autosave ────────────────────────────────────────────────────────────────
@@ -513,10 +1020,11 @@ export class DocumentsService {
   async getVersions(userId: string, documentId: string) {
     const document = await this.prisma.document.findUnique({
       where: { id: documentId },
+      select: { id: true, ownerId: true, isDeleted: true },
     });
     if (!document || document.isDeleted)
       throw new NotFoundException('Document not found.');
-    this.assertDocumentAccess(userId, document);
+    await this.assertCanRead(userId, documentId, document.ownerId);
 
     const versions = await this.prisma.documentVersion.findMany({
       where: { documentId },
@@ -705,39 +1213,256 @@ export class DocumentsService {
       );
     }
 
-    // Must be owner or an EDITOR collaborator
-    const isOwner = document.ownerId === userId;
-    if (!isOwner) {
-      const collab = await this.prisma.documentCollaborator.findUnique({
-        where: { documentId_userId: { documentId, userId } },
-      });
-      if (!collab?.isActive || collab.role !== 'EDITOR') {
-        throw new ForbiddenException(
-          'You do not have edit access to this document.',
-        );
-      }
-    }
+    await this.assertCanEdit(userId, documentId, document.ownerId);
 
     return document;
   }
 
-  private assertDocumentAccess(
+  private async assertCanRead(
     userId: string,
-    document: {
-      ownerId: string;
-      collaborators?: { userId: string; isActive: boolean }[];
-    },
+    documentId: string,
+    ownerId: string,
   ) {
-    const isOwner = document.ownerId === userId;
-    if (isOwner) return;
+    if (ownerId === userId) {
+      return;
+    }
 
-    const isCollaborator = document.collaborators?.some(
-      (c) => c.userId === userId && c.isActive,
+    await this.assertCollaboratorPermission(
+      userId,
+      documentId,
+      CollaboratorPermission.READ,
+      'You do not have access to this document.',
+    );
+  }
+
+  private async assertCanEdit(
+    userId: string,
+    documentId: string,
+    ownerId: string,
+  ) {
+    if (ownerId === userId) {
+      return;
+    }
+
+    await this.assertCollaboratorPermission(
+      userId,
+      documentId,
+      CollaboratorPermission.EDIT,
+      'You do not have edit access to this document.',
+    );
+  }
+
+  private async assertCanManageAccess(
+    userId: string,
+    documentId: string,
+    ownerId: string,
+  ) {
+    if (ownerId === userId) {
+      return;
+    }
+
+    await this.assertCollaboratorPermission(
+      userId,
+      documentId,
+      CollaboratorPermission.MANAGE_ACCESS,
+      'You do not have permission to manage document access.',
+    );
+  }
+
+  private async assertCollaboratorPermission(
+    userId: string,
+    documentId: string,
+    permission: CollaboratorPermission,
+    message: string,
+  ) {
+    const hasPermission = await this.hasCollaboratorPermission(
+      userId,
+      documentId,
+      permission,
     );
 
-    if (!isCollaborator) {
-      throw new ForbiddenException('You do not have access to this document.');
+    if (!hasPermission) {
+      throw new ForbiddenException(message);
     }
+  }
+
+  private async hasCollaboratorPermission(
+    userId: string,
+    documentId: string,
+    permission: CollaboratorPermission,
+  ): Promise<boolean> {
+    const collaborator = await this.prisma.documentCollaborator.findUnique({
+      where: { documentId_userId: { documentId, userId } },
+      select: {
+        role: true,
+        permissions: true,
+        invitationStatus: true,
+        acceptedAt: true,
+        isActive: true,
+      },
+    });
+
+    return this.hasPermission(collaborator, permission);
+  }
+
+  private hasPermission(
+    collaborator:
+      | {
+          role: CollaboratorRole;
+          permissions: CollaboratorPermission[];
+          invitationStatus: CollaboratorInvitationStatus;
+          acceptedAt: Date | null;
+          isActive: boolean;
+        }
+      | null,
+    permission: CollaboratorPermission,
+  ): boolean {
+    if (!collaborator) {
+      return false;
+    }
+
+    if (
+      !collaborator.isActive ||
+      collaborator.acceptedAt === null ||
+      collaborator.invitationStatus !== CollaboratorInvitationStatus.ACCEPTED
+    ) {
+      return false;
+    }
+
+    return this.getEffectivePermissions(collaborator).includes(permission);
+  }
+
+  private getEffectivePermissions(collaborator: {
+    role: CollaboratorRole;
+    permissions: CollaboratorPermission[];
+  }): CollaboratorPermission[] {
+    if (collaborator.permissions.length > 0) {
+      return collaborator.permissions;
+    }
+
+    return this.getLegacyPermissions(collaborator.role);
+  }
+
+  private getLegacyPermissions(
+    role: CollaboratorRole,
+  ): CollaboratorPermission[] {
+    if (role === CollaboratorRole.EDITOR) {
+      return [
+        CollaboratorPermission.READ,
+        CollaboratorPermission.COMMENT,
+        CollaboratorPermission.EDIT,
+      ];
+    }
+
+    if (role === CollaboratorRole.SIGNER) {
+      return [CollaboratorPermission.READ, CollaboratorPermission.SIGN];
+    }
+
+    return [CollaboratorPermission.READ, CollaboratorPermission.COMMENT];
+  }
+
+  private normalizePermissions(
+    permissions: CollaboratorPermissionValue[],
+  ): CollaboratorPermission[] {
+    const unique = new Set<CollaboratorPermission>();
+
+    for (const permission of permissions) {
+      unique.add(permission as CollaboratorPermission);
+    }
+
+    if (unique.size === 0) {
+      throw new BadRequestException(
+        'At least one permission must be granted to share this document.',
+      );
+    }
+
+    if (unique.size > 0) {
+      unique.add(CollaboratorPermission.READ);
+    }
+
+    return CANONICAL_PERMISSION_ORDER.filter((permission) =>
+      unique.has(permission),
+    );
+  }
+
+  private deriveLegacyRole(
+    permissions: CollaboratorPermission[],
+  ): CollaboratorRole {
+    if (permissions.includes(CollaboratorPermission.EDIT)) {
+      return CollaboratorRole.EDITOR;
+    }
+
+    if (permissions.includes(CollaboratorPermission.SIGN)) {
+      return CollaboratorRole.SIGNER;
+    }
+
+    return CollaboratorRole.VIEWER;
+  }
+
+  private buildInvitationExpiry(expiresInDays?: number): Date {
+    const days = expiresInDays ?? DEFAULT_INVITATION_EXPIRY_DAYS;
+    const safeDays = Math.min(Math.max(days, 1), 30);
+    const expiry = new Date();
+    expiry.setDate(expiry.getDate() + safeDays);
+    return expiry;
+  }
+
+  private formatCollaboratorAccess(collaborator: CollaboratorWithProfile) {
+    const displayName = collaborator.user.citizenIdentity
+      ? `${collaborator.user.citizenIdentity.postNames} ${collaborator.user.citizenIdentity.surName}`.trim()
+      : collaborator.user.email;
+
+    return {
+      id: collaborator.id,
+      userId: collaborator.userId,
+      role: collaborator.role,
+      permissions: collaborator.permissions,
+      invitationStatus: collaborator.invitationStatus,
+      invitedAt: collaborator.invitedAt,
+      acceptedAt: collaborator.acceptedAt,
+      declinedAt: collaborator.declinedAt,
+      revokedAt: collaborator.revokedAt,
+      note: collaborator.note,
+      isActive: collaborator.isActive,
+      user: {
+        email: collaborator.user.email,
+        imageUrl: collaborator.user.imageUrl,
+        displayName,
+        surName: collaborator.user.citizenIdentity?.surName ?? null,
+        postNames: collaborator.user.citizenIdentity?.postNames ?? null,
+      },
+      invitedBy: collaborator.invitedBy,
+    };
+  }
+
+  private async recordAccessAudit(params: {
+    documentId: string;
+    collaboratorId: string | null;
+    actorUserId: string;
+    targetUserId: string | null;
+    eventType: DocumentAccessAuditEvent;
+    fromPermissions: CollaboratorPermission[];
+    toPermissions: CollaboratorPermission[];
+    invitationStatus: CollaboratorInvitationStatus | null;
+    metadata: Prisma.InputJsonValue | null;
+    ipAddress?: string | null;
+    userAgent?: string | null;
+  }) {
+    await this.prisma.documentAccessAuditLog.create({
+      data: {
+        documentId: params.documentId,
+        collaboratorId: params.collaboratorId ?? undefined,
+        actorUserId: params.actorUserId,
+        targetUserId: params.targetUserId ?? undefined,
+        eventType: params.eventType,
+        fromPermissions: params.fromPermissions,
+        toPermissions: params.toPermissions,
+        invitationStatus: params.invitationStatus ?? undefined,
+        metadata: params.metadata ?? undefined,
+        ipAddress: params.ipAddress ?? undefined,
+        userAgent: params.userAgent ?? undefined,
+      },
+    });
   }
 
   private async assertFolderOwner(userId: string, folderId: string) {

@@ -31,6 +31,13 @@ class EnvironmentVariables {
   })
   JWT_SECRET: string;
 
+  @IsString()
+  @MinLength(32, {
+    message:
+      'ENCRYPTION_SECRET must be at least 32 chars and match api/auth/',
+  })
+  ENCRYPTION_SECRET: string;
+
   @IsString() @IsNotEmpty() AWS_REGION: string;
   @IsString() @IsNotEmpty() AWS_ACCESS_KEY_ID: string;
   @IsString() @IsNotEmpty() AWS_SECRET_ACCESS_KEY: string;

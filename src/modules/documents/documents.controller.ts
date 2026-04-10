@@ -61,6 +61,24 @@ export class DocumentsController {
     return this.service.create(user.userId, dto);
   }
 
+  @Post(':documentId/copy')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiOperation({
+    summary:
+      'Create a draft copy of an existing document with collision-safe copy naming.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'A new draft copy was created for the current user.',
+  })
+  makeCopy(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+  ) {
+    return this.service.makeCopy(user.userId, documentId);
+  }
+
   // ─── List ──────────────────────────────────────────────────────────────────
 
   @Get()

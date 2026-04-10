@@ -54,10 +54,13 @@ model User {
   signatureRequestsMade DocumentSignatureRequest[] @relation("SignatureRequestor")
   documents Document[] @relation("DocumentOwner")
   documentFolders DocumentFolder[]
-  documentCollaborators DocumentCollaborator[]
+  documentCollaborators DocumentCollaborator[] @relation("DocumentCollaboratorRecipient")
+  documentInvitationsSent DocumentCollaborator[] @relation("DocumentInviteSender")
   documentVersions DocumentVersion[]
   documentComments DocumentComment[]
   signatureRequestsReceived DocumentSignatureRequest[] @relation("SignatureRespondent")
+  documentAccessAuditEventsActed DocumentAccessAuditLog[] @relation("DocumentAccessAuditActor")
+  documentAccessAuditEventsTargeted DocumentAccessAuditLog[] @relation("DocumentAccessAuditTarget")
 }
 
 // ─── Citizen Identities ───────────────────────────────────────────────────────
@@ -749,6 +752,7 @@ model Document {
   owner         User                    @relation("DocumentOwner",       fields: [ownerId],   references: [id], onDelete: Cascade)
   folder        DocumentFolder?         @relation(fields: [folderId],   references: [id],    onDelete: SetNull)
   collaborators DocumentCollaborator[]
+  accessAuditLogs DocumentAccessAuditLog[]
   versions      DocumentVersion[]
   comments      DocumentComment[]
   signatureRequests DocumentSignatureRequest[]
@@ -795,25 +799,40 @@ model DocumentFolder {
 
 // ─── Document Collaborators ───────────────────────────────────────────────────
 // Maps a verified user to a document they did not create.
-// VIEWER can read and comment. EDITOR can read, comment, and edit.
-// SIGNER is a user who is required to sign before the document can be LOCKED.
+// `role` is kept temporarily for backward compatibility while the API migrates
+// to additive permission checks. The new `permissions` field is the source of
+// truth for future access control decisions and invitation payloads.
 // A document owner is never in this table — they are always the owner.
 // Collaborators are always ID-verified users — unverified users cannot be added.
 model DocumentCollaborator {
-  id           String               @id @default(uuid())
-  documentId   String
-  userId       String
-  role         CollaboratorRole                         // VIEWER, EDITOR, SIGNER
-  invitedAt    DateTime             @default(now())
-  acceptedAt   DateTime?                                // null = invitation pending
-  isActive     Boolean              @default(true)
+  id                  String                         @id @default(uuid())
+  documentId          String
+  userId              String
+  role                CollaboratorRole                                   // legacy compatibility field
+  permissions         CollaboratorPermission[]        @default([READ])   // additive access model going forward
+  invitedByUserId     String?
+  invitationStatus    CollaboratorInvitationStatus   @default(PENDING)
+  invitationTokenHash String?                        @unique             // hashed single-use invitation token
+  invitationExpiresAt DateTime?
+  invitationEmailSentAt DateTime?
+  invitationOpenedAt  DateTime?
+  invitedAt           DateTime                       @default(now())
+  acceptedAt          DateTime?                                          // null = invitation not yet accepted
+  declinedAt          DateTime?
+  revokedAt           DateTime?
+  note                String?                        @db.Text            // optional sender note shown on invite
+  isActive            Boolean                        @default(false)     // flips true only after explicit acceptance
 
-  document     Document             @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  user         User                 @relation(fields: [userId],     references: [id], onDelete: Cascade)
+  document            Document                       @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user                User                           @relation("DocumentCollaboratorRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy           User?                          @relation("DocumentInviteSender", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+  accessAuditLogs     DocumentAccessAuditLog[]
 
   @@unique([documentId, userId])
   @@index([documentId])
   @@index([userId])
+  @@index([invitedByUserId])
+  @@index([invitationStatus])
   @@map("document_collaborators")
 }
 
@@ -821,6 +840,71 @@ enum CollaboratorRole {
   VIEWER
   EDITOR
   SIGNER    // Must sign before document can be locked
+}
+
+enum CollaboratorPermission {
+  READ
+  COMMENT
+  SIGN
+  EDIT
+  MANAGE_ACCESS
+}
+
+enum CollaboratorInvitationStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  REVOKED
+  EXPIRED
+}
+
+// ─── Document Access Audit Logs ───────────────────────────────────────────────
+// Immutable audit trail of every invitation and permission event.
+// We keep both actorUserId and targetUserId because the actor and recipient are
+// often different people, and some events happen before access is granted.
+model DocumentAccessAuditLog {
+  id                String                         @id @default(uuid())
+  documentId        String
+  collaboratorId    String?
+  actorUserId       String?
+  targetUserId      String?
+  eventType         DocumentAccessAuditEvent
+  fromPermissions   CollaboratorPermission[]      @default([])
+  toPermissions     CollaboratorPermission[]      @default([])
+  invitationStatus  CollaboratorInvitationStatus?
+  metadata          Json?
+  ipAddress         String?
+  userAgent         String?
+  createdAt         DateTime                      @default(now())
+
+  document          Document                      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  collaborator      DocumentCollaborator?         @relation(fields: [collaboratorId], references: [id], onDelete: SetNull)
+  actorUser         User?                         @relation("DocumentAccessAuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  targetUser        User?                         @relation("DocumentAccessAuditTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  @@index([documentId, createdAt])
+  @@index([collaboratorId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([targetUserId, createdAt])
+  @@index([eventType, createdAt])
+  @@map("document_access_audit_logs")
+}
+
+enum DocumentAccessAuditEvent {
+  INVITE_CREATED
+  INVITE_EMAIL_QUEUED
+  INVITE_EMAIL_SENT
+  INVITE_EMAIL_FAILED
+  INVITE_OPENED
+  AUTH_REQUIRED
+  LOGIN_COMPLETED
+  IDENTITY_VERIFICATION_REQUIRED
+  IDENTITY_VERIFICATION_PASSED
+  IDENTITY_VERIFICATION_FAILED
+  INVITE_ACCEPTED
+  INVITE_DECLINED
+  INVITE_REVOKED
+  PERMISSIONS_UPDATED
 }
 
 // ─── Document Versions ───────────────────────────────────────────────────────

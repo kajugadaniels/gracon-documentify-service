@@ -3,6 +3,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
+import { json, urlencoded } from 'express';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 import { ThrottlerExceptionFilter } from './common/filters/throttler-exception.filter';
@@ -13,8 +14,15 @@ async function bootstrap() {
   const config = app.get(ConfigService);
   const port = config.get<number>('APP_PORT', 3005);
   const env = config.get<string>('APP_ENV', 'development');
+  const maxContentSizeBytes = config.get<number>(
+    'MAX_CONTENT_SIZE_BYTES',
+    10 * 1024 * 1024,
+  );
+  const bodyLimit = `${maxContentSizeBytes}b`;
 
   app.use(helmet());
+  app.use(json({ limit: bodyLimit }));
+  app.use(urlencoded({ extended: true, limit: bodyLimit }));
   app.setGlobalPrefix('api/v1');
   app.enableCors(
     buildCorsConfig(

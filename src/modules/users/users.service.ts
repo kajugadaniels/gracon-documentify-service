@@ -5,9 +5,14 @@
  * Only returns safe display fields — no passwords, encrypted NIDs, or tokens.
  */
 
-import { Injectable } from '@nestjs/common';
-import * as crypto from 'crypto';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
+
+export type UserSearchMode = 'email' | 'id';
+
+const PLATFORM_ID_LENGTH = 11;
+const CITIZEN_ID_LENGTH = 16;
 
 export interface UserSearchResult {
   id: string;
@@ -20,65 +25,92 @@ export interface UserSearchResult {
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(UsersService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly encryption: EncryptionService,
+  ) {}
 
   /**
-   * Searches active, verified users by a partial email match or an exact
-   * platform/citizen ID match.
+   * Searches active, verified users either by partial email match or by
+   * decrypting stored identifiers and comparing the exact full numeric ID.
    *
    * Results are capped at 20 regardless of the `limit` argument to prevent
    * accidental mass enumeration. Callers must enforce the 5-character minimum
    * before invoking this method — the controller layer already does so.
    *
-   * Platform and citizen IDs are stored as SHA-256 hashes, so they are only
-   * searchable by exact full-value input, not partial matching.
+   * Platform IDs in this codebase are 11 digits. Citizen IDs are 16 digits.
    *
-   * @param query  Partial email or full platform/citizen ID.
+   * @param query  Partial email or full numeric ID.
+   * @param mode   Explicit search mode from the caller.
    * @param limit  Desired result count (default 10, hard cap 20).
    * @returns      Array of safe user summaries.
    */
-  async searchUsers(query: string, limit = 10): Promise<UserSearchResult[]> {
+  async searchUsers(
+    query: string,
+    mode: UserSearchMode,
+    limit = 10,
+  ): Promise<UserSearchResult[]> {
     const safeLimit = Math.min(limit, 20);
     const normalizedQuery = query.trim();
-    const identityQuery = normalizedQuery.replace(/\s+/g, '');
-    const queryHash = crypto
-      .createHash('sha256')
-      .update(identityQuery)
-      .digest('hex');
+
+    if (mode === 'email') {
+      const users = await this.prisma.user.findMany({
+        where: {
+          isActive: true,
+          isVerified: true,
+          email: { contains: normalizedQuery, mode: 'insensitive' },
+        },
+        select: {
+          id: true,
+          email: true,
+          imageUrl: true,
+          citizenIdentity: {
+            select: { surName: true, postNames: true },
+          },
+        },
+        take: safeLimit,
+        orderBy: { email: 'asc' },
+      });
+
+      return users.map((u) => ({
+        id: u.id,
+        email: u.email,
+        surName: u.citizenIdentity?.surName ?? null,
+        postNames: u.citizenIdentity?.postNames ?? null,
+        imageUrl: u.imageUrl ?? null,
+        matchedBy: 'EMAIL',
+      }));
+    }
 
     const users = await this.prisma.user.findMany({
       where: {
         isActive: true,
         isVerified: true,
-        OR: [
-          { email: { contains: normalizedQuery, mode: 'insensitive' } },
-          { platformId: { is: { pidHash: queryHash } } },
-          { citizenIdentity: { is: { nidHash: queryHash } } },
-        ],
+        OR: [{ platformId: { isNot: null } }, { citizenIdentity: { isNot: null } }],
       },
       select: {
         id: true,
         email: true,
         imageUrl: true,
         citizenIdentity: {
-          select: { surName: true, postNames: true, nidHash: true },
+          select: { surName: true, postNames: true, nidEncrypted: true },
         },
         platformId: {
-          select: { pidHash: true },
+          select: { pidEncrypted: true },
         },
       },
-      take: safeLimit,
       orderBy: { email: 'asc' },
     });
 
     return users
       .map((u) => {
-        const matchedBy: UserSearchResult['matchedBy'] =
-          u.platformId?.pidHash === queryHash
-            ? 'PLATFORM_ID'
-            : u.citizenIdentity?.nidHash === queryHash
-              ? 'CITIZEN_ID'
-              : 'EMAIL';
+        const matchedBy = this.matchNumericIdentifier(normalizedQuery, u);
+
+        if (!matchedBy) {
+          return null;
+        }
 
         return {
           id: u.id,
@@ -89,14 +121,57 @@ export class UsersService {
           matchedBy,
         };
       })
+      .filter((user): user is UserSearchResult => Boolean(user))
+      .slice(0, safeLimit)
       .sort((a, b) => {
         if (a.matchedBy === b.matchedBy) {
           return a.email.localeCompare(b.email);
         }
 
-        if (a.matchedBy === 'EMAIL') return 1;
         if (b.matchedBy === 'EMAIL') return -1;
+        if (a.matchedBy === 'EMAIL') return 1;
         return a.email.localeCompare(b.email);
       });
+  }
+
+  private matchNumericIdentifier(
+    query: string,
+    user: {
+      platformId: { pidEncrypted: string } | null;
+      citizenIdentity:
+        | { nidEncrypted: string; surName: string; postNames: string }
+        | null;
+    },
+  ): UserSearchResult['matchedBy'] | null {
+    if (query.length === PLATFORM_ID_LENGTH && user.platformId?.pidEncrypted) {
+      try {
+        const pid = this.encryption.decrypt(user.platformId.pidEncrypted);
+        if (pid === query) {
+          return 'PLATFORM_ID';
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Failed to decrypt platform ID while searching users: ${String(error)}`,
+        );
+      }
+    }
+
+    if (
+      query.length === CITIZEN_ID_LENGTH &&
+      user.citizenIdentity?.nidEncrypted
+    ) {
+      try {
+        const nid = this.encryption.decrypt(user.citizenIdentity.nidEncrypted);
+        if (nid === query) {
+          return 'CITIZEN_ID';
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Failed to decrypt citizen ID while searching users: ${String(error)}`,
+        );
+      }
+    }
+
+    return null;
   }
 }

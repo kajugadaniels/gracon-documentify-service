@@ -152,6 +152,58 @@ export class DocumentsService {
     return this.formatDocument(updated);
   }
 
+  async makeCopy(userId: string, documentId: string) {
+    const source = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      include: {
+        collaborators: {
+          where: { isActive: true },
+          select: { userId: true, isActive: true },
+        },
+      },
+    });
+
+    if (!source || source.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    this.assertDocumentAccess(userId, source);
+
+    const content = source.s3ContentKey
+      ? await this.s3.getJson(source.s3ContentKey)
+      : source.type === 'RICH_TEXT'
+        ? EMPTY_RICH_TEXT_CONTENT
+        : EMPTY_SPREADSHEET_CONTENT;
+
+    const baseTitle = this.stripCopySuffix(source.title);
+    const title = await this.buildNextCopyTitle(userId, baseTitle);
+    const folderId = await this.resolveCopyFolderId(userId, source);
+
+    const copy = await this.prisma.document.create({
+      data: {
+        ownerId: userId,
+        title,
+        type: source.type,
+        status: 'DRAFT',
+        folderId,
+        tags: source.tags,
+        wordCount: source.wordCount,
+      },
+    });
+
+    const contentKey = documentContentKey(copy.id);
+    await this.s3.putJson(contentKey, content);
+
+    const updated = await this.prisma.document.update({
+      where: { id: copy.id },
+      data: { s3ContentKey: contentKey },
+    });
+
+    await this.createVersionSnapshot(copy.id, userId, content, 1);
+
+    return this.formatDocument(updated);
+  }
+
   // ─── List ────────────────────────────────────────────────────────────────────
 
   async findAll(userId: string, dto: QueryDocumentsDto) {
@@ -698,6 +750,22 @@ export class DocumentsService {
     }
   }
 
+  private async resolveCopyFolderId(
+    userId: string,
+    document: { ownerId: string; folderId: string | null },
+  ) {
+    if (!document.folderId || document.ownerId !== userId) {
+      return null;
+    }
+
+    const folder = await this.prisma.documentFolder.findUnique({
+      where: { id: document.folderId },
+      select: { ownerId: true },
+    });
+
+    return folder?.ownerId === userId ? document.folderId : null;
+  }
+
   private async createVersionSnapshot(
     documentId: string,
     userId: string,
@@ -741,6 +809,53 @@ export class DocumentsService {
       (_, key: string) => variables[key] ?? `{{${key}}}`,
     );
     return JSON.parse(resolved) as Record<string, unknown>;
+  }
+
+  private stripCopySuffix(title: string) {
+    const normalized = title.trim() || 'Untitled Document';
+    return normalized.replace(/ Copy(?: \(\d+\))?$/, '');
+  }
+
+  private async buildNextCopyTitle(userId: string, baseTitle: string) {
+    const copyStem = `${baseTitle} Copy`;
+    const matches = await this.prisma.document.findMany({
+      where: {
+        ownerId: userId,
+        isDeleted: false,
+        title: { startsWith: copyStem },
+      },
+      select: { title: true },
+    });
+
+    const usedNumbers = new Set<number>();
+    let hasPlainCopy = false;
+
+    for (const match of matches) {
+      if (match.title === copyStem) {
+        hasPlainCopy = true;
+        continue;
+      }
+
+      const suffix = match.title.slice(copyStem.length);
+      const numberedMatch = suffix.match(/^ \((\d+)\)$/);
+      if (!numberedMatch) continue;
+
+      const value = Number.parseInt(numberedMatch[1], 10);
+      if (Number.isInteger(value) && value >= 1) {
+        usedNumbers.add(value);
+      }
+    }
+
+    if (!hasPlainCopy) {
+      return copyStem;
+    }
+
+    let nextNumber = 1;
+    while (usedNumbers.has(nextNumber)) {
+      nextNumber += 1;
+    }
+
+    return `${copyStem} (${nextNumber})`;
   }
 
   private formatDocument(doc: Record<string, unknown>) {

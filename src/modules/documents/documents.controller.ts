@@ -97,6 +97,77 @@ export class DocumentsController {
 
   // ─── Get one ───────────────────────────────────────────────────────────────
 
+  @Get('invitations/:token')
+  @Public()
+  @Throttle({ strict: { limit: 30, ttl: 600_000 } })
+  @ApiParam({ name: 'token', type: String })
+  @ApiOperation({
+    summary:
+      'Public invitation preview endpoint. Returns only safe metadata before authentication.',
+  })
+  previewInvitation(@Param('token') token: string, @Req() req: Request) {
+    return this.service.getInvitationPreview(token, {
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') ?? null,
+    });
+  }
+
+  @Get('invitations/:token/review')
+  @Throttle({ strict: { limit: 30, ttl: 600_000 } })
+  @ApiParam({ name: 'token', type: String })
+  @ApiOperation({
+    summary:
+      'Authenticated invitation review endpoint. Reveals document title only to the invited verified user.',
+  })
+  reviewInvitation(
+    @CurrentUser() user: RequestUser,
+    @Param('token') token: string,
+    @Req() req: Request,
+  ) {
+    return this.service.getInvitationReview(user.userId, token, {
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') ?? null,
+    });
+  }
+
+  @Post('invitations/:token/accept')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ strict: { limit: 20, ttl: 600_000 } })
+  @ApiParam({ name: 'token', type: String })
+  @ApiOperation({
+    summary:
+      'Accept an active document invitation. Requires the invited verified user.',
+  })
+  acceptInvitation(
+    @CurrentUser() user: RequestUser,
+    @Param('token') token: string,
+    @Req() req: Request,
+  ) {
+    return this.service.acceptInvitation(user.userId, token, {
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') ?? null,
+    });
+  }
+
+  @Post('invitations/:token/decline')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ strict: { limit: 20, ttl: 600_000 } })
+  @ApiParam({ name: 'token', type: String })
+  @ApiOperation({
+    summary:
+      'Decline an active document invitation. Requires the invited verified user.',
+  })
+  declineInvitation(
+    @CurrentUser() user: RequestUser,
+    @Param('token') token: string,
+    @Req() req: Request,
+  ) {
+    return this.service.declineInvitation(user.userId, token, {
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent') ?? null,
+    });
+  }
+
   @Get(':documentId')
   @ApiParam({ name: 'documentId', type: String })
   @ApiQuery({

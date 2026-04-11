@@ -816,6 +816,24 @@ export class DocumentsService {
       },
     });
 
+    await this.recordAccessAudit({
+      documentId,
+      collaboratorId: null,
+      actorUserId: userId,
+      targetUserId: userId,
+      eventType: parentCommentId
+        ? DocumentAccessAuditEvent.COMMENT_REPLIED
+        : DocumentAccessAuditEvent.COMMENT_CREATED,
+      fromPermissions: [],
+      toPermissions: [],
+      invitationStatus: null,
+      metadata: {
+        commentId: comment.id,
+        parentCommentId,
+        anchored: Boolean(anchorText && anchorFrom !== null && anchorTo !== null),
+      },
+    });
+
     return this.formatDocumentComment(comment);
   }
 
@@ -844,6 +862,7 @@ export class DocumentsService {
       throw new NotFoundException('Comment not found.');
     }
 
+    const wasAlreadyResolved = Boolean(existing.resolvedAt);
     const comment = await this.prisma.documentComment.update({
       where: { id: existing.id },
       data: {
@@ -877,6 +896,24 @@ export class DocumentsService {
         },
       },
     });
+
+    if (!wasAlreadyResolved) {
+      await this.recordAccessAudit({
+        documentId,
+        collaboratorId: null,
+        actorUserId: userId,
+        targetUserId: comment.authorId,
+        eventType: DocumentAccessAuditEvent.COMMENT_RESOLVED,
+        fromPermissions: [],
+        toPermissions: [],
+        invitationStatus: null,
+        metadata: {
+          commentId: comment.id,
+          resolvedAt:
+            comment.resolvedAt?.toISOString() ?? new Date().toISOString(),
+        },
+      });
+    }
 
     return this.formatDocumentComment(comment);
   }
@@ -2493,12 +2530,16 @@ export class DocumentsService {
     const source = metadata as Record<string, unknown>;
     const allowedKeys = [
       'acceptedAt',
+      'anchored',
+      'commentId',
       'declinedAt',
       'expiresAt',
       'notePresent',
       'openedAt',
+      'parentCommentId',
       'previousStatus',
       'resent',
+      'resolvedAt',
       'sentAt',
     ];
     const sanitized: Record<string, unknown> = {};

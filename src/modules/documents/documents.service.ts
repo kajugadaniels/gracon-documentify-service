@@ -32,7 +32,10 @@ import {
 } from './dto/update-document.dto';
 import { FinaliseDocumentDto } from './dto/finalise-document.dto';
 import { LockDocumentDto } from './dto/lock-document.dto';
-import { QueryDocumentsDto } from './dto/query-documents.dto';
+import {
+  QueryDocumentsDto,
+  type DocumentListScope,
+} from './dto/query-documents.dto';
 import {
   ShareDocumentAccessDto,
   UpdateDocumentAccessDto,
@@ -141,6 +144,22 @@ type InvitationLookupRecord = {
       postNames: string;
     } | null;
   };
+  invitedBy: {
+    id: string;
+    email: string;
+    citizenIdentity: {
+      surName: string;
+      postNames: string;
+    } | null;
+  } | null;
+};
+
+type DocumentAccessCollaboratorSummary = {
+  id: string;
+  userId: string;
+  role: CollaboratorRole;
+  permissions: CollaboratorPermission[];
+  acceptedAt: Date | null;
   invitedBy: {
     id: string;
     email: string;
@@ -307,17 +326,35 @@ export class DocumentsService {
 
   async findAll(userId: string, dto: QueryDocumentsDto) {
     const skip = ((dto.page ?? 1) - 1) * (dto.limit ?? 20);
-
-    const where = {
-      ownerId: userId,
+    const scope = dto.scope ?? 'ALL_ACCESSIBLE';
+    const baseWhere: Prisma.DocumentWhereInput = {
       isDeleted: false,
       ...(dto.status ? { status: dto.status } : {}),
       ...(dto.type ? { type: dto.type } : {}),
       ...(dto.folderId ? { folderId: dto.folderId } : {}),
       ...(dto.search
-        ? { title: { contains: dto.search, mode: 'insensitive' as const } }
+        ? {
+            title: {
+              contains: dto.search,
+              mode: Prisma.QueryMode.insensitive,
+            },
+          }
         : {}),
     };
+
+    const acceptedSharedAccess: Prisma.DocumentCollaboratorWhereInput = {
+      userId,
+      isActive: true,
+      acceptedAt: { not: null },
+      invitationStatus: CollaboratorInvitationStatus.ACCEPTED,
+      permissions: { has: CollaboratorPermission.READ },
+    };
+    const where = this.buildDocumentListWhere(
+      userId,
+      scope,
+      baseWhere,
+      acceptedSharedAccess,
+    );
 
     const [total, items] = await Promise.all([
       this.prisma.document.count({ where }),
@@ -328,6 +365,7 @@ export class DocumentsService {
         take: dto.limit ?? 20,
         select: {
           id: true,
+          ownerId: true,
           title: true,
           type: true,
           status: true,
@@ -338,6 +376,25 @@ export class DocumentsService {
           updatedAt: true,
           signedAt: true,
           lockedAt: true,
+          collaborators: {
+            where: { userId },
+            select: {
+              id: true,
+              userId: true,
+              role: true,
+              permissions: true,
+              acceptedAt: true,
+              invitedBy: {
+                select: {
+                  id: true,
+                  email: true,
+                  citizenIdentity: {
+                    select: { surName: true, postNames: true },
+                  },
+                },
+              },
+            },
+          },
         },
       }),
     ]);
@@ -346,7 +403,10 @@ export class DocumentsService {
       total,
       page: dto.page ?? 1,
       limit: dto.limit ?? 20,
-      items,
+      items: items.map((item) => ({
+        ...this.formatDocument(item),
+        access: this.buildDocumentAccessSummary(userId, item),
+      })),
     };
   }
 
@@ -405,6 +465,7 @@ export class DocumentsService {
     await this.assertCanRead(userId, documentId, document.ownerId);
 
     const result: Record<string, unknown> = this.formatDocument(document);
+    result['access'] = this.buildDocumentAccessSummary(userId, document);
     const canManageAccess =
       document.ownerId === userId ||
       (await this.hasCollaboratorPermission(
@@ -1754,6 +1815,69 @@ export class DocumentsService {
     }
 
     return [CollaboratorPermission.READ, CollaboratorPermission.COMMENT];
+  }
+
+  private buildDocumentListWhere(
+    userId: string,
+    scope: DocumentListScope,
+    baseWhere: Prisma.DocumentWhereInput,
+    acceptedSharedAccess: Prisma.DocumentCollaboratorWhereInput,
+  ): Prisma.DocumentWhereInput {
+    if (scope === 'OWNED') {
+      return {
+        ...baseWhere,
+        ownerId: userId,
+      };
+    }
+
+    if (scope === 'SHARED_WITH_ME') {
+      return {
+        ...baseWhere,
+        ownerId: { not: userId },
+        collaborators: { some: acceptedSharedAccess },
+      };
+    }
+
+    return {
+      ...baseWhere,
+      OR: [
+        { ownerId: userId },
+        {
+          ownerId: { not: userId },
+          collaborators: { some: acceptedSharedAccess },
+        },
+      ],
+    };
+  }
+
+  private buildDocumentAccessSummary(
+    userId: string,
+    document: {
+      ownerId: string;
+      collaborators?: DocumentAccessCollaboratorSummary[];
+    },
+  ) {
+    const isOwner = document.ownerId === userId;
+    const collaborator =
+      document.collaborators?.find((entry) => entry.userId === userId) ?? null;
+
+    return {
+      isOwner,
+      role: isOwner ? 'OWNER' : collaborator?.role ?? null,
+      collaboratorId: collaborator?.id ?? null,
+      permissions: isOwner
+        ? CANONICAL_PERMISSION_ORDER
+        : collaborator?.permissions ?? [],
+      acceptedAt: collaborator?.acceptedAt ?? null,
+      sharedBy:
+        !isOwner && collaborator?.invitedBy
+          ? {
+              id: collaborator.invitedBy.id,
+              email: collaborator.invitedBy.email,
+              displayName: this.getInviterDisplayName(collaborator.invitedBy),
+            }
+          : null,
+    };
   }
 
   private normalizePermissions(

@@ -235,6 +235,31 @@ export class DocumentsController {
     });
   }
 
+  @Post(':documentId/access/:collaboratorId/resend')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiParam({ name: 'collaboratorId', type: String })
+  @ApiOperation({
+    summary:
+      'Resend an invitation with a fresh single-use token. Accepted active collaborators cannot be resent.',
+  })
+  resendAccessInvitation(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+    @Param('collaboratorId') collaboratorId: string,
+    @Req() req: Request,
+  ) {
+    return this.service.resendAccessInvitation(
+      user.userId,
+      documentId,
+      collaboratorId,
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') ?? null,
+      },
+    );
+  }
+
   @Patch(':documentId/access/:collaboratorId')
   @HttpCode(HttpStatus.OK)
   @ApiParam({ name: 'documentId', type: String })

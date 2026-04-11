@@ -933,6 +933,7 @@ model DocumentVersion {
 // ─── Document Comments ────────────────────────────────────────────────────────
 // Inline comments tied to a position in the document.
 // anchorText: the text the comment is anchored to (for display).
+// anchorFrom/anchorTo: TipTap document selection positions for visual anchors.
 // resolvedAt: set when the owner marks the comment resolved.
 // Replies are stored as comments with a parentCommentId.
 model DocumentComment {
@@ -941,6 +942,8 @@ model DocumentComment {
   authorId        String
   parentCommentId String?                              // null = top-level, set = reply
   anchorText      String?   @db.Text                  // text selection the comment is on
+  anchorFrom      Int?
+  anchorTo        Int?
   content         String    @db.Text
   resolvedAt      DateTime?
   createdAt       DateTime  @default(now())

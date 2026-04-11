@@ -10,7 +10,25 @@ import {
 import { Transform } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
+export const DOCUMENT_LIST_SCOPES = [
+  'ALL_ACCESSIBLE',
+  'OWNED',
+  'SHARED_WITH_ME',
+] as const;
+
+export type DocumentListScope = (typeof DOCUMENT_LIST_SCOPES)[number];
+
 export class QueryDocumentsDto {
+  @ApiPropertyOptional({
+    enum: DOCUMENT_LIST_SCOPES,
+    default: 'ALL_ACCESSIBLE',
+    description:
+      'Controls whether the list returns owned documents, accepted shared documents, or both.',
+  })
+  @IsOptional()
+  @IsIn([...DOCUMENT_LIST_SCOPES])
+  scope?: DocumentListScope = 'ALL_ACCESSIBLE';
+
   @ApiPropertyOptional({ enum: ['DRAFT', 'FINALISED', 'SIGNED', 'LOCKED'] })
   @IsOptional()
   @IsIn(['DRAFT', 'FINALISED', 'SIGNED', 'LOCKED'])

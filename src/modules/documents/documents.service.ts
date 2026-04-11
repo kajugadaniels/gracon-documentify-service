@@ -41,6 +41,7 @@ import {
   UpdateDocumentAccessDto,
   type CollaboratorPermissionValue,
 } from './dto/manage-access.dto';
+import { CreateDocumentCommentDto } from './dto/document-comment.dto';
 
 // Default empty Tiptap document structure
 const EMPTY_RICH_TEXT_CONTENT = {
@@ -168,6 +169,32 @@ type DocumentAccessCollaboratorSummary = {
       postNames: string;
     } | null;
   } | null;
+};
+
+type DocumentCommentAuthorRecord = {
+  id: string;
+  email: string;
+  imageUrl: string | null;
+  citizenIdentity: {
+    surName: string;
+    postNames: string;
+  } | null;
+};
+
+type DocumentCommentReplyRecord = {
+  id: string;
+  authorId: string;
+  parentCommentId: string | null;
+  anchorText: string | null;
+  content: string;
+  resolvedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+  author: DocumentCommentAuthorRecord;
+};
+
+type DocumentCommentRecord = DocumentCommentReplyRecord & {
+  replies: DocumentCommentReplyRecord[];
 };
 
 // Backward-compat: derive x/y from old alignment enum for documents
@@ -631,6 +658,212 @@ export class DocumentsService {
           : null,
       })),
     };
+  }
+
+  async listComments(userId: string, documentId: string) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      select: { id: true, ownerId: true, isDeleted: true },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    await this.assertCanRead(userId, documentId, document.ownerId);
+
+    const comments = await this.prisma.documentComment.findMany({
+      where: { documentId, parentCommentId: null },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        author: {
+          select: {
+            id: true,
+            email: true,
+            imageUrl: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+        replies: {
+          orderBy: { createdAt: 'asc' },
+          include: {
+            author: {
+              select: {
+                id: true,
+                email: true,
+                imageUrl: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return {
+      documentId,
+      comments: comments
+        .sort((left, right) => {
+          const leftResolved = left.resolvedAt ? 1 : 0;
+          const rightResolved = right.resolvedAt ? 1 : 0;
+          if (leftResolved !== rightResolved) return leftResolved - rightResolved;
+          return right.createdAt.getTime() - left.createdAt.getTime();
+        })
+        .map((comment) => this.formatDocumentComment(comment)),
+    };
+  }
+
+  async createComment(
+    userId: string,
+    documentId: string,
+    dto: CreateDocumentCommentDto,
+  ) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      select: { id: true, ownerId: true, isDeleted: true },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    await this.assertCanComment(userId, documentId, document.ownerId);
+
+    const content = dto.content.trim();
+    if (!content) {
+      throw new BadRequestException('Comment cannot be empty.');
+    }
+
+    const parentCommentId = dto.parentCommentId?.trim() || null;
+    if (parentCommentId) {
+      const parent = await this.prisma.documentComment.findFirst({
+        where: { id: parentCommentId, documentId },
+        select: {
+          id: true,
+          parentCommentId: true,
+          resolvedAt: true,
+        },
+      });
+
+      if (!parent) {
+        throw new NotFoundException('Parent comment not found.');
+      }
+
+      if (parent.parentCommentId) {
+        throw new BadRequestException(
+          'Replies can only be added to top-level comments.',
+        );
+      }
+
+      if (parent.resolvedAt) {
+        throw new ConflictException('Resolved comments cannot receive replies.');
+      }
+    }
+
+    const anchorText = dto.anchorText?.trim() || null;
+    const comment = await this.prisma.documentComment.create({
+      data: {
+        documentId,
+        authorId: userId,
+        parentCommentId,
+        anchorText,
+        content,
+      },
+      include: {
+        author: {
+          select: {
+            id: true,
+            email: true,
+            imageUrl: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+        replies: {
+          include: {
+            author: {
+              select: {
+                id: true,
+                email: true,
+                imageUrl: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return this.formatDocumentComment(comment);
+  }
+
+  async resolveComment(userId: string, documentId: string, commentId: string) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      select: { id: true, ownerId: true, isDeleted: true },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    if (document.ownerId !== userId) {
+      throw new ForbiddenException(
+        'Only the document owner can resolve comments.',
+      );
+    }
+
+    const existing = await this.prisma.documentComment.findFirst({
+      where: { id: commentId, documentId, parentCommentId: null },
+      select: { id: true, resolvedAt: true },
+    });
+
+    if (!existing) {
+      throw new NotFoundException('Comment not found.');
+    }
+
+    const comment = await this.prisma.documentComment.update({
+      where: { id: existing.id },
+      data: {
+        resolvedAt: existing.resolvedAt ?? new Date(),
+      },
+      include: {
+        author: {
+          select: {
+            id: true,
+            email: true,
+            imageUrl: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+        replies: {
+          orderBy: { createdAt: 'asc' },
+          include: {
+            author: {
+              select: {
+                id: true,
+                email: true,
+                imageUrl: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return this.formatDocumentComment(comment);
   }
 
   async shareAccess(
@@ -2052,6 +2285,23 @@ export class DocumentsService {
     );
   }
 
+  private async assertCanComment(
+    userId: string,
+    documentId: string,
+    ownerId: string,
+  ) {
+    if (ownerId === userId) {
+      return;
+    }
+
+    await this.assertCollaboratorPermission(
+      userId,
+      documentId,
+      CollaboratorPermission.COMMENT,
+      'You do not have comment access to this document.',
+    );
+  }
+
   private async assertCollaboratorPermission(
     userId: string,
     documentId: string,
@@ -2194,7 +2444,9 @@ export class DocumentsService {
       collaboratorId: collaborator?.id ?? null,
       permissions: isOwner
         ? CANONICAL_PERMISSION_ORDER
-        : collaborator?.permissions ?? [],
+        : collaborator
+          ? this.getEffectivePermissions(collaborator)
+          : [],
       acceptedAt: collaborator?.acceptedAt ?? null,
       sharedBy:
         !isOwner && collaborator?.invitedBy
@@ -2262,6 +2514,51 @@ export class DocumentsService {
     return {
       id: user.id,
       email: user.email,
+      displayName: this.formatUserDisplayName(
+        user.citizenIdentity?.postNames ?? null,
+        user.citizenIdentity?.surName ?? null,
+        user.email,
+      ),
+    };
+  }
+
+  private formatDocumentComment(comment: DocumentCommentRecord) {
+    return {
+      id: comment.id,
+      authorId: comment.authorId,
+      parentCommentId: comment.parentCommentId,
+      anchorText: comment.anchorText,
+      content: comment.content,
+      resolvedAt: comment.resolvedAt,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+      author: this.formatCommentAuthor(comment.author),
+      replies: comment.replies.map((reply) =>
+        this.formatDocumentCommentReply(reply),
+      ),
+    };
+  }
+
+  private formatDocumentCommentReply(reply: DocumentCommentReplyRecord) {
+    return {
+      id: reply.id,
+      authorId: reply.authorId,
+      parentCommentId: reply.parentCommentId,
+      anchorText: reply.anchorText,
+      content: reply.content,
+      resolvedAt: reply.resolvedAt,
+      createdAt: reply.createdAt,
+      updatedAt: reply.updatedAt,
+      author: this.formatCommentAuthor(reply.author),
+      replies: [],
+    };
+  }
+
+  private formatCommentAuthor(user: DocumentCommentAuthorRecord) {
+    return {
+      id: user.id,
+      email: user.email,
+      imageUrl: user.imageUrl,
       displayName: this.formatUserDisplayName(
         user.citizenIdentity?.postNames ?? null,
         user.citizenIdentity?.surName ?? null,

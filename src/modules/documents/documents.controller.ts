@@ -88,7 +88,8 @@ export class DocumentsController {
 
   @Get()
   @ApiOperation({
-    summary: 'List all documents owned by the current user (paginated)',
+    summary:
+      'List documents accessible to the current user, including accepted shared documents.',
   })
   @ApiResponse({ status: 200, description: 'Paginated document list' })
   findAll(@CurrentUser() user: RequestUser, @Query() query: QueryDocumentsDto) {

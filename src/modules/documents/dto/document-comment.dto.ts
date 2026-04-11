@@ -1,4 +1,11 @@
-import { IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import {
+  IsInt,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class CreateDocumentCommentDto {
@@ -19,6 +26,24 @@ export class CreateDocumentCommentDto {
   @IsString()
   @MaxLength(500)
   anchorText?: string;
+
+  @ApiPropertyOptional({
+    description: 'TipTap selection start position for the anchor.',
+    minimum: 0,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  anchorFrom?: number;
+
+  @ApiPropertyOptional({
+    description: 'TipTap selection end position for the anchor.',
+    minimum: 0,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  anchorTo?: number;
 
   @ApiPropertyOptional({
     description: 'Top-level comment ID when creating a reply.',

@@ -2,8 +2,8 @@
  * encryption.service.ts — api/documents
  *
  * Mirrors the auth-service AES decryption logic so documents-only features can
- * compare stored encrypted identifiers without exposing raw encrypted values to
- * callers or controllers.
+ * compare stored encrypted identifiers and securely hash invitation tokens
+ * without exposing raw sensitive values to callers or controllers.
  */
 
 import { Injectable } from '@nestjs/common';
@@ -42,5 +42,24 @@ export class EncryptionService {
     ]);
 
     return decrypted.toString('utf8');
+  }
+
+  /**
+   * Creates a SHA-256 hash for one-way token storage and exact lookup.
+   */
+  hash(value: string): string {
+    return crypto.createHash('sha256').update(value).digest('hex');
+  }
+
+  /**
+   * Compares a raw token against a stored SHA-256 hash in constant time.
+   */
+  compareHash(plainValue: string, hash: string): boolean {
+    const hashedValue = this.hash(plainValue);
+
+    return crypto.timingSafeEqual(
+      Buffer.from(hashedValue, 'hex'),
+      Buffer.from(hash, 'hex'),
+    );
   }
 }

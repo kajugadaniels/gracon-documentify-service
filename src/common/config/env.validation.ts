@@ -55,6 +55,32 @@ class EnvironmentVariables {
   @IsString()
   FRONTEND_URLS?: string;
 
+  @IsString()
+  @IsNotEmpty()
+  DOCS_BASE_URL: string;
+
+  @IsString()
+  @IsNotEmpty()
+  MAIL_HOST: string;
+
+  @Transform(({ value }) => parseInt(value, 10))
+  @IsNumber()
+  @Min(1)
+  @Max(65535)
+  MAIL_PORT: number;
+
+  @IsString()
+  @IsNotEmpty()
+  MAIL_USER: string;
+
+  @IsString()
+  @IsNotEmpty()
+  MAIL_PASS: string;
+
+  @IsString()
+  @IsNotEmpty()
+  MAIL_FROM: string;
+
   @Transform(({ value }) => parseInt(value, 10))
   @IsOptional()
   @IsNumber()

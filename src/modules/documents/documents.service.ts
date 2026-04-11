@@ -6,6 +6,7 @@ import {
   ConflictException,
   Logger,
 } from '@nestjs/common';
+import * as crypto from 'crypto';
 import {
   CollaboratorInvitationStatus,
   CollaboratorPermission,
@@ -16,6 +17,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { S3Service } from '../../common/s3/s3.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
+import { AppMailerService } from '../../common/mailer/mailer.service';
 import {
   hashDocumentContent,
   documentContentKey,
@@ -79,6 +82,9 @@ type CollaboratorAccessRecord = {
   role: CollaboratorRole;
   permissions: CollaboratorPermission[];
   invitationStatus: CollaboratorInvitationStatus;
+  invitationExpiresAt: Date | null;
+  invitationEmailSentAt: Date | null;
+  invitationOpenedAt: Date | null;
   invitedAt: Date;
   acceptedAt: Date | null;
   declinedAt: Date | null;
@@ -99,6 +105,49 @@ type CollaboratorWithProfile = CollaboratorAccessRecord & {
   invitedBy: {
     id: string;
     email: string;
+    citizenIdentity: {
+      surName: string;
+      postNames: string;
+    } | null;
+  } | null;
+};
+
+type InvitationLookupRecord = {
+  id: string;
+  documentId: string;
+  userId: string;
+  permissions: CollaboratorPermission[];
+  invitationStatus: CollaboratorInvitationStatus;
+  invitationTokenHash: string | null;
+  invitationExpiresAt: Date | null;
+  invitationEmailSentAt: Date | null;
+  invitationOpenedAt: Date | null;
+  invitedAt: Date;
+  acceptedAt: Date | null;
+  declinedAt: Date | null;
+  revokedAt: Date | null;
+  note: string | null;
+  isActive: boolean;
+  document: {
+    id: string;
+    title: string;
+    isDeleted: boolean;
+  };
+  user: {
+    email: string;
+    imageUrl: string | null;
+    citizenIdentity: {
+      surName: string;
+      postNames: string;
+    } | null;
+  };
+  invitedBy: {
+    id: string;
+    email: string;
+    citizenIdentity: {
+      surName: string;
+      postNames: string;
+    } | null;
   } | null;
 };
 
@@ -121,6 +170,8 @@ export class DocumentsService {
     private readonly prisma: PrismaService,
     private readonly s3: S3Service,
     private readonly config: ConfigService,
+    private readonly encryption: EncryptionService,
+    private readonly mailer: AppMailerService,
   ) {
     this.maxVersions = this.config.get<number>('MAX_VERSIONS_PER_DOCUMENT', 50);
   }
@@ -312,6 +363,9 @@ export class DocumentsService {
             role: true,
             permissions: true,
             invitationStatus: true,
+            invitationExpiresAt: true,
+            invitationEmailSentAt: true,
+            invitationOpenedAt: true,
             invitedAt: true,
             isActive: true,
             acceptedAt: true,
@@ -331,6 +385,9 @@ export class DocumentsService {
               select: {
                 id: true,
                 email: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
               },
             },
           },
@@ -393,6 +450,9 @@ export class DocumentsService {
             role: true,
             permissions: true,
             invitationStatus: true,
+            invitationExpiresAt: true,
+            invitationEmailSentAt: true,
+            invitationOpenedAt: true,
             invitedAt: true,
             acceptedAt: true,
             declinedAt: true,
@@ -412,6 +472,9 @@ export class DocumentsService {
               select: {
                 id: true,
                 email: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
               },
             },
           },
@@ -500,6 +563,14 @@ export class DocumentsService {
       },
     });
 
+    const requiresInviteEmail = !existing?.acceptedAt;
+    const rawInvitationToken = requiresInviteEmail
+      ? crypto.randomBytes(32).toString('hex')
+      : null;
+    const invitationTokenHash = rawInvitationToken
+      ? this.encryption.hash(rawInvitationToken)
+      : null;
+
     if (!actorIsOwner && dto.userId === actorUserId) {
       throw new ForbiddenException(
         'You cannot change your own document access level.',
@@ -532,7 +603,7 @@ export class DocumentsService {
             revokedAt: null,
             invitationOpenedAt: null,
             invitationEmailSentAt: null,
-            invitationTokenHash: null,
+            invitationTokenHash,
             acceptedAt: existing.acceptedAt,
             isActive: existing.acceptedAt ? true : false,
           },
@@ -542,6 +613,9 @@ export class DocumentsService {
             role: true,
             permissions: true,
             invitationStatus: true,
+            invitationExpiresAt: true,
+            invitationEmailSentAt: true,
+            invitationOpenedAt: true,
             invitedAt: true,
             acceptedAt: true,
             declinedAt: true,
@@ -561,6 +635,9 @@ export class DocumentsService {
               select: {
                 id: true,
                 email: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
               },
             },
           },
@@ -573,6 +650,7 @@ export class DocumentsService {
             permissions,
             invitedByUserId: actorUserId,
             invitationStatus: CollaboratorInvitationStatus.PENDING,
+            invitationTokenHash,
             invitationExpiresAt,
             note: dto.note?.trim() || null,
           },
@@ -582,6 +660,9 @@ export class DocumentsService {
             role: true,
             permissions: true,
             invitationStatus: true,
+            invitationExpiresAt: true,
+            invitationEmailSentAt: true,
+            invitationOpenedAt: true,
             invitedAt: true,
             acceptedAt: true,
             declinedAt: true,
@@ -601,6 +682,9 @@ export class DocumentsService {
               select: {
                 id: true,
                 email: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
               },
             },
           },
@@ -624,7 +708,120 @@ export class DocumentsService {
       ...context,
     });
 
-    return this.formatCollaboratorAccess(saved);
+    let finalCollaborator = saved;
+    let emailStatus: 'sent' | 'failed' | 'not_required' = 'not_required';
+
+    if (rawInvitationToken) {
+      await this.recordAccessAudit({
+        documentId,
+        collaboratorId: saved.id,
+        actorUserId,
+        targetUserId: dto.userId,
+        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_QUEUED,
+        fromPermissions: permissions,
+        toPermissions: permissions,
+        invitationStatus: saved.invitationStatus,
+        metadata: null,
+        ...context,
+      });
+
+      try {
+        await this.mailer.sendDocumentInvitationEmail({
+          to: recipient.email,
+          recipientName: this.formatUserDisplayName(
+            recipient.citizenIdentity?.postNames ?? null,
+            recipient.citizenIdentity?.surName ?? null,
+            recipient.email,
+          ),
+          senderName: this.getInviterDisplayName(saved.invitedBy),
+          accessSummary: this.describePermissions(permissions),
+          note: dto.note?.trim() || null,
+          acceptUrl: this.buildInvitationUrl(rawInvitationToken),
+          expiresIn: this.describeInvitationExpiry(invitationExpiresAt),
+        });
+
+        finalCollaborator = await this.prisma.documentCollaborator.update({
+          where: { id: saved.id },
+          data: {
+            invitationEmailSentAt: new Date(),
+          },
+          select: {
+            id: true,
+            userId: true,
+            role: true,
+            permissions: true,
+            invitationStatus: true,
+            invitationExpiresAt: true,
+            invitationEmailSentAt: true,
+            invitationOpenedAt: true,
+            invitedAt: true,
+            acceptedAt: true,
+            declinedAt: true,
+            revokedAt: true,
+            note: true,
+            isActive: true,
+            user: {
+              select: {
+                email: true,
+                imageUrl: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
+              },
+            },
+            invitedBy: {
+              select: {
+                id: true,
+                email: true,
+                citizenIdentity: {
+                  select: { surName: true, postNames: true },
+                },
+              },
+            },
+          },
+        });
+
+        emailStatus = 'sent';
+
+        await this.recordAccessAudit({
+          documentId,
+          collaboratorId: saved.id,
+          actorUserId,
+          targetUserId: dto.userId,
+          eventType: DocumentAccessAuditEvent.INVITE_EMAIL_SENT,
+          fromPermissions: permissions,
+          toPermissions: permissions,
+          invitationStatus: finalCollaborator.invitationStatus,
+          metadata: {
+            sentAt: finalCollaborator.invitationEmailSentAt?.toISOString() ?? null,
+          },
+          ...context,
+        });
+      } catch (error) {
+        emailStatus = 'failed';
+
+        await this.recordAccessAudit({
+          documentId,
+          collaboratorId: saved.id,
+          actorUserId,
+          targetUserId: dto.userId,
+          eventType: DocumentAccessAuditEvent.INVITE_EMAIL_FAILED,
+          fromPermissions: permissions,
+          toPermissions: permissions,
+          invitationStatus: saved.invitationStatus,
+          metadata: {
+            message:
+              error instanceof Error ? error.message : 'Invitation email delivery failed.',
+          },
+          ...context,
+        });
+      }
+    }
+
+    return {
+      ...this.formatCollaboratorAccess(finalCollaborator),
+      emailStatus,
+    };
   }
 
   async updateAccess(
@@ -692,6 +889,9 @@ export class DocumentsService {
         role: true,
         permissions: true,
         invitationStatus: true,
+        invitationExpiresAt: true,
+        invitationEmailSentAt: true,
+        invitationOpenedAt: true,
         invitedAt: true,
         acceptedAt: true,
         declinedAt: true,
@@ -711,6 +911,9 @@ export class DocumentsService {
           select: {
             id: true,
             email: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
           },
         },
       },
@@ -802,6 +1005,198 @@ export class DocumentsService {
     });
 
     return { revoked: true, collaboratorId: collaborator.id };
+  }
+
+  async getInvitationPreview(
+    rawToken: string,
+    context: AccessAuditContext = {},
+  ) {
+    const invitation = await this.findInvitationByRawToken(rawToken);
+    await this.recordInvitationOpened(invitation, context);
+
+    return {
+      status: 'pending',
+      requiresAuthentication: true,
+      invitation: {
+        permissions: invitation.permissions,
+        note: invitation.note,
+        invitedAt: invitation.invitedAt,
+        expiresAt: invitation.invitationExpiresAt,
+      },
+      sender: {
+        email: invitation.invitedBy?.email ?? null,
+        displayName: this.getInviterDisplayName(invitation.invitedBy),
+      },
+      recipient: {
+        maskedEmail: this.maskEmail(invitation.user.email),
+      },
+    };
+  }
+
+  async getInvitationReview(
+    userId: string,
+    rawToken: string,
+    context: AccessAuditContext = {},
+  ) {
+    const invitation = await this.getInvitationForRecipient(userId, rawToken);
+    await this.recordInvitationOpened(invitation, context);
+
+    return {
+      status: 'pending',
+      document: {
+        id: invitation.document.id,
+        title: invitation.document.title,
+      },
+      invitation: {
+        permissions: invitation.permissions,
+        note: invitation.note,
+        invitedAt: invitation.invitedAt,
+        expiresAt: invitation.invitationExpiresAt,
+      },
+      sender: {
+        email: invitation.invitedBy?.email ?? null,
+        displayName: this.getInviterDisplayName(invitation.invitedBy),
+      },
+      recipient: {
+        email: invitation.user.email,
+        displayName: this.formatUserDisplayName(
+          invitation.user.citizenIdentity?.postNames ?? null,
+          invitation.user.citizenIdentity?.surName ?? null,
+          invitation.user.email,
+        ),
+      },
+    };
+  }
+
+  async acceptInvitation(
+    userId: string,
+    rawToken: string,
+    context: AccessAuditContext = {},
+  ) {
+    const invitation = await this.getInvitationForRecipient(userId, rawToken);
+    const acceptedAt = new Date();
+
+    const accepted = await this.prisma.documentCollaborator.update({
+      where: { id: invitation.id },
+      data: {
+        invitationStatus: CollaboratorInvitationStatus.ACCEPTED,
+        acceptedAt,
+        declinedAt: null,
+        revokedAt: null,
+        isActive: true,
+        invitationTokenHash: null,
+        invitationOpenedAt: invitation.invitationOpenedAt ?? acceptedAt,
+      },
+      select: {
+        id: true,
+        documentId: true,
+        userId: true,
+        permissions: true,
+        invitationStatus: true,
+        invitationExpiresAt: true,
+        invitationEmailSentAt: true,
+        invitationOpenedAt: true,
+        invitedAt: true,
+        acceptedAt: true,
+        declinedAt: true,
+        revokedAt: true,
+        note: true,
+        isActive: true,
+        document: {
+          select: {
+            id: true,
+            title: true,
+            isDeleted: true,
+          },
+        },
+        user: {
+          select: {
+            email: true,
+            imageUrl: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+        invitedBy: {
+          select: {
+            id: true,
+            email: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+      },
+    });
+
+    await this.recordAccessAudit({
+      documentId: invitation.documentId,
+      collaboratorId: invitation.id,
+      actorUserId: userId,
+      targetUserId: invitation.userId,
+      eventType: DocumentAccessAuditEvent.INVITE_ACCEPTED,
+      fromPermissions: invitation.permissions,
+      toPermissions: invitation.permissions,
+      invitationStatus: CollaboratorInvitationStatus.ACCEPTED,
+      metadata: {
+        acceptedAt: acceptedAt.toISOString(),
+      },
+      ...context,
+    });
+
+    return {
+      accepted: true,
+      document: {
+        id: accepted.document.id,
+        title: accepted.document.title,
+      },
+      permissions: accepted.permissions,
+    };
+  }
+
+  async declineInvitation(
+    userId: string,
+    rawToken: string,
+    context: AccessAuditContext = {},
+  ) {
+    const invitation = await this.getInvitationForRecipient(userId, rawToken);
+    const declinedAt = new Date();
+
+    await this.prisma.documentCollaborator.update({
+      where: { id: invitation.id },
+      data: {
+        invitationStatus: CollaboratorInvitationStatus.DECLINED,
+        declinedAt,
+        acceptedAt: null,
+        isActive: false,
+        invitationTokenHash: null,
+        invitationOpenedAt: invitation.invitationOpenedAt ?? declinedAt,
+      },
+    });
+
+    await this.recordAccessAudit({
+      documentId: invitation.documentId,
+      collaboratorId: invitation.id,
+      actorUserId: userId,
+      targetUserId: invitation.userId,
+      eventType: DocumentAccessAuditEvent.INVITE_DECLINED,
+      fromPermissions: invitation.permissions,
+      toPermissions: invitation.permissions,
+      invitationStatus: CollaboratorInvitationStatus.DECLINED,
+      metadata: {
+        declinedAt: declinedAt.toISOString(),
+      },
+      ...context,
+    });
+
+    return {
+      declined: true,
+      document: {
+        id: invitation.document.id,
+        title: invitation.document.title,
+      },
+    };
   }
 
   // ─── Autosave ────────────────────────────────────────────────────────────────
@@ -1407,10 +1802,243 @@ export class DocumentsService {
     return expiry;
   }
 
+  private buildInvitationUrl(rawToken: string): string {
+    const baseUrl = this.resolveDocumentsFrontendUrl();
+    return `${baseUrl}/invitations/${encodeURIComponent(rawToken)}`;
+  }
+
+  private resolveDocumentsFrontendUrl(): string {
+    const explicit = this.config.get<string>('DOCS_BASE_URL');
+    if (explicit?.trim()) {
+      return explicit.trim().replace(/\/$/, '');
+    }
+
+    const additionalOrigins = this.config.get<string>('FRONTEND_URLS');
+    if (additionalOrigins) {
+      const docsOrigin = additionalOrigins
+        .split(',')
+        .map((origin) => origin.trim())
+        .find(Boolean);
+
+      if (docsOrigin) {
+        return docsOrigin.replace(/\/$/, '');
+      }
+    }
+
+    return this.config.getOrThrow<string>('FRONTEND_URL').replace(/\/$/, '');
+  }
+
+  private describePermissions(
+    permissions: CollaboratorPermission[],
+  ): string {
+    const labels = permissions
+      .filter((permission) => permission !== CollaboratorPermission.READ)
+      .map((permission) => {
+        if (permission === CollaboratorPermission.MANAGE_ACCESS) {
+          return 'manage access';
+        }
+
+        return permission.toLowerCase();
+      });
+
+    if (labels.length === 0) {
+      return 'read access';
+    }
+
+    if (labels.length === 1) {
+      return `${labels[0]} access`;
+    }
+
+    const head = labels.slice(0, -1).join(', ');
+    const tail = labels.at(-1);
+    return `${head} and ${tail} access`;
+  }
+
+  private describeInvitationExpiry(expiry: Date): string {
+    const diffMs = expiry.getTime() - Date.now();
+    const days = Math.max(1, Math.ceil(diffMs / (24 * 60 * 60 * 1000)));
+    return days === 1 ? '1 day' : `${days} days`;
+  }
+
+  private formatUserDisplayName(
+    postNames: string | null,
+    surName: string | null,
+    fallback: string,
+  ): string {
+    const fullName = `${postNames ?? ''} ${surName ?? ''}`.trim();
+    return fullName || fallback;
+  }
+
+  private getInviterDisplayName(
+    invitedBy: CollaboratorWithProfile['invitedBy'] | InvitationLookupRecord['invitedBy'],
+  ): string {
+    if (!invitedBy) {
+      return 'A verified user';
+    }
+
+    return this.formatUserDisplayName(
+      invitedBy.citizenIdentity?.postNames ?? null,
+      invitedBy.citizenIdentity?.surName ?? null,
+      invitedBy.email,
+    );
+  }
+
+  private maskEmail(email: string): string {
+    const [localPart, domain = ''] = email.split('@');
+    if (!localPart) {
+      return email;
+    }
+
+    const visiblePrefix = localPart.slice(0, 2);
+    return `${visiblePrefix}${'*'.repeat(Math.max(localPart.length - 2, 2))}@${domain}`;
+  }
+
+  private assertInvitationTokenFormat(rawToken: string) {
+    if (!/^[a-f0-9]{64}$/i.test(rawToken)) {
+      throw new NotFoundException('Invitation not found or expired.');
+    }
+  }
+
+  private async findInvitationByRawToken(
+    rawToken: string,
+  ): Promise<InvitationLookupRecord> {
+    this.assertInvitationTokenFormat(rawToken);
+    const tokenHash = this.encryption.hash(rawToken);
+
+    const invitation = await this.prisma.documentCollaborator.findFirst({
+      where: { invitationTokenHash: tokenHash },
+      select: {
+        id: true,
+        documentId: true,
+        userId: true,
+        permissions: true,
+        invitationStatus: true,
+        invitationTokenHash: true,
+        invitationExpiresAt: true,
+        invitationEmailSentAt: true,
+        invitationOpenedAt: true,
+        invitedAt: true,
+        acceptedAt: true,
+        declinedAt: true,
+        revokedAt: true,
+        note: true,
+        isActive: true,
+        document: {
+          select: {
+            id: true,
+            title: true,
+            isDeleted: true,
+          },
+        },
+        user: {
+          select: {
+            email: true,
+            imageUrl: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+        invitedBy: {
+          select: {
+            id: true,
+            email: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!invitation || !invitation.invitationTokenHash) {
+      throw new NotFoundException('Invitation not found or expired.');
+    }
+
+    if (!this.encryption.compareHash(rawToken, invitation.invitationTokenHash)) {
+      throw new NotFoundException('Invitation not found or expired.');
+    }
+
+    if (invitation.document.isDeleted) {
+      throw new NotFoundException('Invitation not found or expired.');
+    }
+
+    if (
+      invitation.invitationStatus === CollaboratorInvitationStatus.PENDING &&
+      invitation.invitationExpiresAt &&
+      invitation.invitationExpiresAt.getTime() <= Date.now()
+    ) {
+      await this.prisma.documentCollaborator.update({
+        where: { id: invitation.id },
+        data: {
+          invitationStatus: CollaboratorInvitationStatus.EXPIRED,
+          isActive: false,
+        },
+      });
+
+      throw new ConflictException('This invitation has expired.');
+    }
+
+    if (invitation.invitationStatus !== CollaboratorInvitationStatus.PENDING) {
+      throw new ConflictException('This invitation is no longer active.');
+    }
+
+    return invitation;
+  }
+
+  private async getInvitationForRecipient(
+    userId: string,
+    rawToken: string,
+  ): Promise<InvitationLookupRecord> {
+    const invitation = await this.findInvitationByRawToken(rawToken);
+
+    if (invitation.userId !== userId) {
+      throw new ForbiddenException(
+        'This invitation was issued to a different verified account.',
+      );
+    }
+
+    return invitation;
+  }
+
+  private async recordInvitationOpened(
+    invitation: InvitationLookupRecord,
+    context: AccessAuditContext,
+  ) {
+    if (invitation.invitationOpenedAt) {
+      return;
+    }
+
+    const openedAt = new Date();
+    await this.prisma.documentCollaborator.update({
+      where: { id: invitation.id },
+      data: {
+        invitationOpenedAt: openedAt,
+      },
+    });
+
+    await this.recordAccessAudit({
+      documentId: invitation.documentId,
+      collaboratorId: invitation.id,
+      actorUserId: null,
+      targetUserId: invitation.userId,
+      eventType: DocumentAccessAuditEvent.INVITE_OPENED,
+      fromPermissions: invitation.permissions,
+      toPermissions: invitation.permissions,
+      invitationStatus: invitation.invitationStatus,
+      metadata: {
+        openedAt: openedAt.toISOString(),
+      },
+      ...context,
+    });
+  }
+
   private formatCollaboratorAccess(collaborator: CollaboratorWithProfile) {
-    const displayName = collaborator.user.citizenIdentity
-      ? `${collaborator.user.citizenIdentity.postNames} ${collaborator.user.citizenIdentity.surName}`.trim()
-      : collaborator.user.email;
+    const displayName = this.formatUserDisplayName(
+      collaborator.user.citizenIdentity?.postNames ?? null,
+      collaborator.user.citizenIdentity?.surName ?? null,
+      collaborator.user.email,
+    );
 
     return {
       id: collaborator.id,
@@ -1418,6 +2046,9 @@ export class DocumentsService {
       role: collaborator.role,
       permissions: collaborator.permissions,
       invitationStatus: collaborator.invitationStatus,
+      invitationExpiresAt: collaborator.invitationExpiresAt,
+      invitationEmailSentAt: collaborator.invitationEmailSentAt,
+      invitationOpenedAt: collaborator.invitationOpenedAt,
       invitedAt: collaborator.invitedAt,
       acceptedAt: collaborator.acceptedAt,
       declinedAt: collaborator.declinedAt,
@@ -1431,14 +2062,20 @@ export class DocumentsService {
         surName: collaborator.user.citizenIdentity?.surName ?? null,
         postNames: collaborator.user.citizenIdentity?.postNames ?? null,
       },
-      invitedBy: collaborator.invitedBy,
+      invitedBy: collaborator.invitedBy
+        ? {
+            id: collaborator.invitedBy.id,
+            email: collaborator.invitedBy.email,
+            displayName: this.getInviterDisplayName(collaborator.invitedBy),
+          }
+        : null,
     };
   }
 
   private async recordAccessAudit(params: {
     documentId: string;
     collaboratorId: string | null;
-    actorUserId: string;
+    actorUserId: string | null;
     targetUserId: string | null;
     eventType: DocumentAccessAuditEvent;
     fromPermissions: CollaboratorPermission[];
@@ -1452,7 +2089,7 @@ export class DocumentsService {
       data: {
         documentId: params.documentId,
         collaboratorId: params.collaboratorId ?? undefined,
-        actorUserId: params.actorUserId,
+        actorUserId: params.actorUserId ?? undefined,
         targetUserId: params.targetUserId ?? undefined,
         eventType: params.eventType,
         fromPermissions: params.fromPermissions,

@@ -212,6 +212,26 @@ export class DocumentsController {
     return this.service.getAccessList(user.userId, documentId);
   }
 
+  @Get(':documentId/access/audit')
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: 'Maximum number of audit events to return. Default: 50, max: 100.',
+  })
+  @ApiOperation({
+    summary:
+      'List sanitized document access audit events. Owner only.',
+  })
+  getAccessAuditLog(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.service.getAccessAuditLog(user.userId, documentId, limit);
+  }
+
   @Post(':documentId/access')
   @HttpCode(HttpStatus.CREATED)
   @ApiParam({ name: 'documentId', type: String })

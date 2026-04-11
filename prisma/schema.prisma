@@ -953,6 +953,7 @@ model DocumentComment {
 
   @@index([documentId])
   @@index([authorId])
+  @@index([parentCommentId])
   @@map("document_comments")
 }
 

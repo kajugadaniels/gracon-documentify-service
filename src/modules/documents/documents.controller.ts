@@ -39,6 +39,7 @@ import {
   ShareDocumentAccessDto,
   UpdateDocumentAccessDto,
 } from './dto/manage-access.dto';
+import { CreateDocumentCommentDto } from './dto/document-comment.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import type { RequestUser } from '../auth/interfaces/jwt-payload.interface';
@@ -191,6 +192,53 @@ export class DocumentsController {
       documentId,
       includeContent !== 'false',
     );
+  }
+
+  // ─── Comments ─────────────────────────────────────────────────────────────
+
+  @Get(':documentId/comments')
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiOperation({
+    summary:
+      'List comment threads for a document. Requires read access.',
+  })
+  listComments(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+  ) {
+    return this.service.listComments(user.userId, documentId);
+  }
+
+  @Post(':documentId/comments')
+  @HttpCode(HttpStatus.CREATED)
+  @Throttle({ strict: { limit: 60, ttl: 600_000 } })
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiOperation({
+    summary:
+      'Create a document comment or reply. Requires explicit comment access.',
+  })
+  createComment(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+    @Body() dto: CreateDocumentCommentDto,
+  ) {
+    return this.service.createComment(user.userId, documentId, dto);
+  }
+
+  @Patch(':documentId/comments/:commentId/resolve')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiParam({ name: 'commentId', type: String })
+  @ApiOperation({
+    summary:
+      'Resolve a top-level document comment. Owner only.',
+  })
+  resolveComment(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+    @Param('commentId') commentId: string,
+  ) {
+    return this.service.resolveComment(user.userId, documentId, commentId);
   }
 
   // ─── Access management ────────────────────────────────────────────────────

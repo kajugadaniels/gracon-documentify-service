@@ -998,6 +998,258 @@ export class DocumentsService {
     return this.formatCollaboratorAccess(updated);
   }
 
+  async resendAccessInvitation(
+    actorUserId: string,
+    documentId: string,
+    collaboratorId: string,
+    context: AccessAuditContext = {},
+  ) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      select: { id: true, ownerId: true, isDeleted: true },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    await this.assertCanManageAccess(actorUserId, documentId, document.ownerId);
+    const actorIsOwner = actorUserId === document.ownerId;
+
+    const collaborator = await this.prisma.documentCollaborator.findFirst({
+      where: { id: collaboratorId, documentId },
+      select: {
+        id: true,
+        userId: true,
+        permissions: true,
+        invitationStatus: true,
+        acceptedAt: true,
+        isActive: true,
+        note: true,
+        user: {
+          select: {
+            email: true,
+            imageUrl: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!collaborator) {
+      throw new NotFoundException('Collaborator not found.');
+    }
+
+    if (
+      collaborator.isActive &&
+      collaborator.acceptedAt &&
+      collaborator.invitationStatus === CollaboratorInvitationStatus.ACCEPTED
+    ) {
+      throw new ConflictException(
+        'This collaborator has already accepted access. Update permissions instead.',
+      );
+    }
+
+    if (!actorIsOwner && collaborator.userId === actorUserId) {
+      throw new ForbiddenException('You cannot resend an invitation to yourself.');
+    }
+
+    if (
+      !actorIsOwner &&
+      collaborator.permissions.includes(CollaboratorPermission.MANAGE_ACCESS)
+    ) {
+      throw new ForbiddenException(
+        'Only the document owner can resend an invitation for another access manager.',
+      );
+    }
+
+    const rawInvitationToken = crypto.randomBytes(32).toString('hex');
+    const invitationTokenHash = this.encryption.hash(rawInvitationToken);
+    const invitationExpiresAt = this.buildInvitationExpiry();
+    const previousStatus = collaborator.invitationStatus;
+
+    const saved = await this.prisma.documentCollaborator.update({
+      where: { id: collaborator.id },
+      data: {
+        invitedByUserId: actorUserId,
+        invitationStatus: CollaboratorInvitationStatus.PENDING,
+        invitationTokenHash,
+        invitationExpiresAt,
+        invitationOpenedAt: null,
+        invitationEmailSentAt: null,
+        invitedAt: new Date(),
+        acceptedAt: null,
+        declinedAt: null,
+        revokedAt: null,
+        isActive: false,
+      },
+      select: {
+        id: true,
+        userId: true,
+        role: true,
+        permissions: true,
+        invitationStatus: true,
+        invitationExpiresAt: true,
+        invitationEmailSentAt: true,
+        invitationOpenedAt: true,
+        invitedAt: true,
+        acceptedAt: true,
+        declinedAt: true,
+        revokedAt: true,
+        note: true,
+        isActive: true,
+        user: {
+          select: {
+            email: true,
+            imageUrl: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+        invitedBy: {
+          select: {
+            id: true,
+            email: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+      },
+    });
+
+    await this.recordAccessAudit({
+      documentId,
+      collaboratorId: saved.id,
+      actorUserId,
+      targetUserId: saved.userId,
+      eventType: DocumentAccessAuditEvent.INVITE_CREATED,
+      fromPermissions: collaborator.permissions,
+      toPermissions: saved.permissions,
+      invitationStatus: saved.invitationStatus,
+      metadata: {
+        resent: true,
+        previousStatus,
+        expiresAt: invitationExpiresAt.toISOString(),
+      },
+      ...context,
+    });
+
+    await this.recordAccessAudit({
+      documentId,
+      collaboratorId: saved.id,
+      actorUserId,
+      targetUserId: saved.userId,
+      eventType: DocumentAccessAuditEvent.INVITE_EMAIL_QUEUED,
+      fromPermissions: saved.permissions,
+      toPermissions: saved.permissions,
+      invitationStatus: saved.invitationStatus,
+      metadata: { resent: true },
+      ...context,
+    });
+
+    let finalCollaborator = saved;
+    let emailStatus: 'sent' | 'failed' = 'sent';
+
+    try {
+      await this.mailer.sendDocumentInvitationEmail({
+        to: collaborator.user.email,
+        recipientName: this.formatUserDisplayName(
+          collaborator.user.citizenIdentity?.postNames ?? null,
+          collaborator.user.citizenIdentity?.surName ?? null,
+          collaborator.user.email,
+        ),
+        senderName: this.getInviterDisplayName(saved.invitedBy),
+        accessSummary: this.describePermissions(saved.permissions),
+        note: saved.note,
+        acceptUrl: this.buildInvitationUrl(rawInvitationToken),
+        expiresIn: this.describeInvitationExpiry(invitationExpiresAt),
+      });
+
+      finalCollaborator = await this.prisma.documentCollaborator.update({
+        where: { id: saved.id },
+        data: { invitationEmailSentAt: new Date() },
+        select: {
+          id: true,
+          userId: true,
+          role: true,
+          permissions: true,
+          invitationStatus: true,
+          invitationExpiresAt: true,
+          invitationEmailSentAt: true,
+          invitationOpenedAt: true,
+          invitedAt: true,
+          acceptedAt: true,
+          declinedAt: true,
+          revokedAt: true,
+          note: true,
+          isActive: true,
+          user: {
+            select: {
+              email: true,
+              imageUrl: true,
+              citizenIdentity: {
+                select: { surName: true, postNames: true },
+              },
+            },
+          },
+          invitedBy: {
+            select: {
+              id: true,
+              email: true,
+              citizenIdentity: {
+                select: { surName: true, postNames: true },
+              },
+            },
+          },
+        },
+      });
+
+      await this.recordAccessAudit({
+        documentId,
+        collaboratorId: saved.id,
+        actorUserId,
+        targetUserId: saved.userId,
+        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_SENT,
+        fromPermissions: saved.permissions,
+        toPermissions: saved.permissions,
+        invitationStatus: finalCollaborator.invitationStatus,
+        metadata: {
+          resent: true,
+          sentAt: finalCollaborator.invitationEmailSentAt?.toISOString() ?? null,
+        },
+        ...context,
+      });
+    } catch (error) {
+      emailStatus = 'failed';
+
+      await this.recordAccessAudit({
+        documentId,
+        collaboratorId: saved.id,
+        actorUserId,
+        targetUserId: saved.userId,
+        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_FAILED,
+        fromPermissions: saved.permissions,
+        toPermissions: saved.permissions,
+        invitationStatus: saved.invitationStatus,
+        metadata: {
+          resent: true,
+          message:
+            error instanceof Error ? error.message : 'Invitation email delivery failed.',
+        },
+        ...context,
+      });
+    }
+
+    return {
+      ...this.formatCollaboratorAccess(finalCollaborator),
+      emailStatus,
+    };
+  }
+
   async revokeAccess(
     actorUserId: string,
     documentId: string,

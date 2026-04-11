@@ -831,6 +831,7 @@ model DocumentCollaborator {
   @@unique([documentId, userId])
   @@index([documentId])
   @@index([userId])
+  @@index([userId, invitationStatus, isActive])
   @@index([invitedByUserId])
   @@index([invitationStatus])
   @@map("document_collaborators")

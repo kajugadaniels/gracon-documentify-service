@@ -906,6 +906,9 @@ enum DocumentAccessAuditEvent {
   INVITE_DECLINED
   INVITE_REVOKED
   PERMISSIONS_UPDATED
+  COMMENT_CREATED
+  COMMENT_REPLIED
+  COMMENT_RESOLVED
 }
 
 // ─── Document Versions ───────────────────────────────────────────────────────

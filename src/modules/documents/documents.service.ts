@@ -186,6 +186,8 @@ type DocumentCommentReplyRecord = {
   authorId: string;
   parentCommentId: string | null;
   anchorText: string | null;
+  anchorFrom: number | null;
+  anchorTo: number | null;
   content: string;
   resolvedAt: Date | null;
   createdAt: Date;
@@ -765,12 +767,25 @@ export class DocumentsService {
     }
 
     const anchorText = dto.anchorText?.trim() || null;
+    const hasAnchorPositions =
+      Number.isInteger(dto.anchorFrom) && Number.isInteger(dto.anchorTo);
+    const anchorFrom = hasAnchorPositions ? dto.anchorFrom! : null;
+    const anchorTo = hasAnchorPositions ? dto.anchorTo! : null;
+    if (
+      hasAnchorPositions &&
+      (anchorFrom === null || anchorTo === null || anchorFrom >= anchorTo)
+    ) {
+      throw new BadRequestException('Invalid comment anchor selection.');
+    }
+
     const comment = await this.prisma.documentComment.create({
       data: {
         documentId,
         authorId: userId,
         parentCommentId,
         anchorText,
+        anchorFrom,
+        anchorTo,
         content,
       },
       include: {
@@ -2528,6 +2543,8 @@ export class DocumentsService {
       authorId: comment.authorId,
       parentCommentId: comment.parentCommentId,
       anchorText: comment.anchorText,
+      anchorFrom: comment.anchorFrom,
+      anchorTo: comment.anchorTo,
       content: comment.content,
       resolvedAt: comment.resolvedAt,
       createdAt: comment.createdAt,
@@ -2545,6 +2562,8 @@ export class DocumentsService {
       authorId: reply.authorId,
       parentCommentId: reply.parentCommentId,
       anchorText: reply.anchorText,
+      anchorFrom: reply.anchorFrom,
+      anchorTo: reply.anchorTo,
       content: reply.content,
       resolvedAt: reply.resolvedAt,
       createdAt: reply.createdAt,

@@ -558,6 +558,81 @@ export class DocumentsService {
     };
   }
 
+  async getAccessAuditLog(
+    userId: string,
+    documentId: string,
+    rawLimit?: string,
+  ) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      select: { id: true, ownerId: true, title: true, isDeleted: true },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    if (document.ownerId !== userId) {
+      throw new ForbiddenException(
+        'Only the document owner can view the access audit trail.',
+      );
+    }
+
+    const limit = this.resolveAuditLimit(rawLimit);
+    const events = await this.prisma.documentAccessAuditLog.findMany({
+      where: { documentId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        eventType: true,
+        fromPermissions: true,
+        toPermissions: true,
+        invitationStatus: true,
+        metadata: true,
+        createdAt: true,
+        actorUser: {
+          select: {
+            id: true,
+            email: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+        targetUser: {
+          select: {
+            id: true,
+            email: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+      },
+    });
+
+    return {
+      documentId: document.id,
+      title: document.title,
+      events: events.map((event) => ({
+        id: event.id,
+        eventType: event.eventType,
+        fromPermissions: event.fromPermissions,
+        toPermissions: event.toPermissions,
+        invitationStatus: event.invitationStatus,
+        metadata: this.sanitizeAccessAuditMetadata(event.metadata),
+        createdAt: event.createdAt,
+        actor: event.actorUser
+          ? this.formatAuditUser(event.actorUser)
+          : null,
+        target: event.targetUser
+          ? this.formatAuditUser(event.targetUser)
+          : null,
+      })),
+    };
+  }
+
   async shareAccess(
     actorUserId: string,
     documentId: string,
@@ -2129,6 +2204,69 @@ export class DocumentsService {
               displayName: this.getInviterDisplayName(collaborator.invitedBy),
             }
           : null,
+    };
+  }
+
+  private resolveAuditLimit(rawLimit?: string): number {
+    const parsed = rawLimit ? Number.parseInt(rawLimit, 10) : 50;
+    if (!Number.isInteger(parsed)) {
+      return 50;
+    }
+
+    return Math.min(Math.max(parsed, 1), 100);
+  }
+
+  private sanitizeAccessAuditMetadata(
+    metadata: Prisma.JsonValue | null,
+  ): Record<string, unknown> | null {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      return null;
+    }
+
+    const source = metadata as Record<string, unknown>;
+    const allowedKeys = [
+      'acceptedAt',
+      'declinedAt',
+      'expiresAt',
+      'notePresent',
+      'openedAt',
+      'previousStatus',
+      'resent',
+      'sentAt',
+    ];
+    const sanitized: Record<string, unknown> = {};
+
+    for (const key of allowedKeys) {
+      const value = source[key];
+      if (
+        typeof value === 'string' ||
+        typeof value === 'number' ||
+        typeof value === 'boolean' ||
+        value === null
+      ) {
+        sanitized[key] = value;
+      }
+    }
+
+    return Object.keys(sanitized).length > 0 ? sanitized : null;
+  }
+
+  private formatAuditUser(user: {
+    id: string;
+    email: string;
+    citizenIdentity: {
+      surName: string;
+      postNames: string;
+    } | null;
+  }) {
+    return {
+      id: user.id,
+      email: user.email,
+      displayName: this.formatUserDisplayName(
+        user.citizenIdentity?.postNames ?? null,
+        user.citizenIdentity?.surName ?? null,
+        user.email,
+      ),
     };
   }
 

@@ -12,7 +12,9 @@ import {
   CollaboratorPermission,
   CollaboratorRole,
   DocumentAccessAuditEvent,
+  DocumentStatus,
   Prisma,
+  SignatureRequestStatus,
 } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -197,6 +199,28 @@ type DocumentCommentReplyRecord = {
 
 type DocumentCommentRecord = DocumentCommentReplyRecord & {
   replies: DocumentCommentReplyRecord[];
+};
+
+const SIGNATURE_REQUEST_SUMMARY_SELECT = {
+  id: true,
+  requestedById: true,
+  requestedUserId: true,
+  status: true,
+  personalSignedDocumentId: true,
+  signedAt: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.DocumentSignatureRequestSelect;
+
+type SignatureRequestSummary = Prisma.DocumentSignatureRequestGetPayload<{
+  select: typeof SIGNATURE_REQUEST_SUMMARY_SELECT;
+}>;
+
+type SignedDocumentForLock = {
+  id: string;
+  userId: string;
+  signedAt: Date;
+  certificateId: string;
 };
 
 // Backward-compat: derive x/y from old alignment enum for documents
@@ -482,7 +506,8 @@ export class DocumentsService {
           },
         },
         signatureRequests: {
-          select: { requestedUserId: true, status: true },
+          orderBy: { createdAt: 'asc' },
+          select: SIGNATURE_REQUEST_SUMMARY_SELECT,
         },
       },
     });
@@ -495,6 +520,7 @@ export class DocumentsService {
 
     const result: Record<string, unknown> = this.formatDocument(document);
     result['access'] = this.buildDocumentAccessSummary(userId, document);
+    result['signatureRequests'] = document.signatureRequests;
     const canManageAccess =
       document.ownerId === userId ||
       (await this.hasCollaboratorPermission(
@@ -1239,6 +1265,15 @@ export class DocumentsService {
       }
     }
 
+    await this.reconcileSignatureRequestForCollaborator({
+      documentId,
+      userId: finalCollaborator.userId,
+      permissions: finalCollaborator.permissions,
+      invitationStatus: finalCollaborator.invitationStatus,
+      acceptedAt: finalCollaborator.acceptedAt,
+      isActive: finalCollaborator.isActive,
+    });
+
     return {
       ...this.formatCollaboratorAccess(finalCollaborator),
       emailStatus,
@@ -1353,6 +1388,15 @@ export class DocumentsService {
         accepted: Boolean(collaborator.acceptedAt),
       },
       ...context,
+    });
+
+    await this.reconcileSignatureRequestForCollaborator({
+      documentId,
+      userId: updated.userId,
+      permissions: updated.permissions,
+      invitationStatus: updated.invitationStatus,
+      acceptedAt: updated.acceptedAt,
+      isActive: updated.isActive,
     });
 
     return this.formatCollaboratorAccess(updated);
@@ -1677,6 +1721,12 @@ export class DocumentsService {
       ...context,
     });
 
+    await this.removeUnsignedSignatureRequest(documentId, collaborator.userId);
+    await this.lockDocumentIfAllRequiredSignaturesComplete(
+      documentId,
+      document.ownerId,
+    );
+
     return { revoked: true, collaboratorId: collaborator.id };
   }
 
@@ -1818,6 +1868,15 @@ export class DocumentsService {
       ...context,
     });
 
+    await this.reconcileSignatureRequestForCollaborator({
+      documentId: accepted.documentId,
+      userId: accepted.userId,
+      permissions: accepted.permissions,
+      invitationStatus: accepted.invitationStatus,
+      acceptedAt: accepted.acceptedAt,
+      isActive: accepted.isActive,
+    });
+
     return {
       accepted: true,
       document: {
@@ -1862,6 +1921,11 @@ export class DocumentsService {
       },
       ...context,
     });
+
+    await this.removeUnsignedSignatureRequest(
+      invitation.documentId,
+      invitation.userId,
+    );
 
     return {
       declined: true,
@@ -1965,19 +2029,42 @@ export class DocumentsService {
     const content = await this.s3.getJson(document.s3ContentKey);
     const contentHash = hashDocumentContent(content);
 
-    // Update status and store hash
-    const updated = await this.prisma.document.update({
-      where: { id: documentId },
-      data: {
-        status: 'FINALISED',
-        contentHash,
-        finalisedAt: new Date(),
-      },
+    const signerIds = await this.getRequiredSignerIdsForDocument(
+      documentId,
+      document.ownerId,
+    );
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const saved = await tx.document.update({
+        where: { id: documentId },
+        data: {
+          status: 'FINALISED',
+          contentHash,
+          finalisedAt: new Date(),
+        },
+      });
+
+      await tx.documentSignatureRequest.createMany({
+        data: signerIds.map((requestedUserId) => ({
+          documentId,
+          requestedById: document.ownerId,
+          requestedUserId,
+          message: dto.note?.trim() || null,
+        })),
+        skipDuplicates: true,
+      });
+
+      return saved;
     });
+    const signatureRequests =
+      await this.getSignatureRequestSummaries(documentId);
 
     return {
       ...this.formatDocument(updated),
       contentHash,
+      signatureRequests,
+      pendingSignatureCount:
+        this.countUnsignedSignatureRequestSummaries(signatureRequests),
       message:
         'Document finalised. The content is now frozen. Proceed to sign at api/signature/.',
     };
@@ -2028,56 +2115,66 @@ export class DocumentsService {
       );
     }
 
-    const [activeSignatureImage, signer] = await Promise.all([
-      this.prisma.personalSignatureImage.findFirst({
-        where: { userId, isActive: true },
-        select: {
-          s3Key: true,
-          mimeType: true,
-          sizeBytes: true,
-        },
-      }),
-      this.prisma.user.findUnique({
-        where: { id: userId },
-        select: {
-          citizenIdentity: {
-            select: {
-              surName: true,
-              postNames: true,
-            },
-          },
-        },
-      }),
-    ]);
+    const signatureRequest = await this.ensureSignatureRequestForUser(
+      documentId,
+      document.ownerId,
+      userId,
+    );
 
-    const signerDisplayName =
-      `${signer?.citizenIdentity?.postNames ?? ''} ${signer?.citizenIdentity?.surName ?? ''}`.trim() ||
-      null;
+    if (signatureRequest.status === SignatureRequestStatus.SIGNED) {
+      throw new ConflictException('You have already signed this document.');
+    }
 
-    // Lock the document
-    const updated = await this.prisma.document.update({
-      where: { id: documentId },
-      data: {
-        status: 'LOCKED',
-        personalSignedDocumentId: dto.signatureId,
-        signedAt: signedDoc.signedAt,
-        lockedAt: new Date(),
-        signerDisplayName,
-        signatureImageS3Key: activeSignatureImage?.s3Key ?? null,
-        signatureImageMimeType: activeSignatureImage?.mimeType ?? null,
-        signatureImageSizeBytes: activeSignatureImage?.sizeBytes ?? null,
-        signatureBlockX: DEFAULT_SIGNATURE_X,
-        signatureBlockY: DEFAULT_SIGNATURE_Y,
-      },
-    });
+    const recordedSignature =
+      await this.prisma.documentSignatureRequest.updateMany({
+        where: {
+          id: signatureRequest.id,
+          status: { not: SignatureRequestStatus.SIGNED },
+        },
+        data: {
+          status: SignatureRequestStatus.SIGNED,
+          personalSignedDocumentId: signedDoc.id,
+          signedAt: signedDoc.signedAt,
+        },
+      });
+
+    if (recordedSignature.count === 0) {
+      throw new ConflictException('You have already signed this document.');
+    }
+
+    const pendingSignatureCount =
+      await this.countUnsignedSignatureRequests(documentId);
+
+    if (pendingSignatureCount > 0) {
+      return {
+        ...this.formatDocument(document),
+        signatureRequests: await this.getSignatureRequestSummaries(documentId),
+        signatureSnapshot: await this.buildSignatureSnapshot(document),
+        signatureId: dto.signatureId,
+        pendingSignatureCount,
+        message:
+          'Signature recorded. The document will lock after all required signers complete signing.',
+      };
+    }
+
+    const updated = await this.lockDocumentIfAllRequiredSignaturesComplete(
+      documentId,
+      document.ownerId,
+      signedDoc.id,
+    );
+
+    if (!updated) {
+      throw new ConflictException(
+        'No completed signature is available to lock this document.',
+      );
+    }
 
     return {
       ...this.formatDocument(updated),
-      signatureSnapshot: await this.buildSignatureSnapshot(
-        updated,
-        signedDoc.certificateId,
-      ),
+      signatureSnapshot: await this.buildSignatureSnapshot(updated),
       signatureId: dto.signatureId,
+      signatureRequests: await this.getSignatureRequestSummaries(documentId),
+      pendingSignatureCount: 0,
       message: 'Document locked. It is now permanently immutable.',
     };
   }
@@ -2334,6 +2431,258 @@ export class DocumentsService {
       CollaboratorPermission.SIGN,
       'You do not have signing access to this document.',
     );
+  }
+
+  private async getRequiredSignerIdsForDocument(
+    documentId: string,
+    ownerId: string,
+  ): Promise<string[]> {
+    const collaborators = await this.prisma.documentCollaborator.findMany({
+      where: {
+        documentId,
+        isActive: true,
+        acceptedAt: { not: null },
+        invitationStatus: CollaboratorInvitationStatus.ACCEPTED,
+        permissions: { has: CollaboratorPermission.SIGN },
+      },
+      select: { userId: true },
+    });
+
+    return Array.from(
+      new Set([ownerId, ...collaborators.map((entry) => entry.userId)]),
+    );
+  }
+
+  private async ensureSignatureRequestForUser(
+    documentId: string,
+    ownerId: string,
+    userId: string,
+  ): Promise<SignatureRequestSummary> {
+    const existing = await this.prisma.documentSignatureRequest.findFirst({
+      where: { documentId, requestedUserId: userId },
+      select: SIGNATURE_REQUEST_SUMMARY_SELECT,
+    });
+
+    if (existing) return existing;
+
+    try {
+      return await this.prisma.documentSignatureRequest.create({
+        data: { documentId, requestedById: ownerId, requestedUserId: userId },
+        select: SIGNATURE_REQUEST_SUMMARY_SELECT,
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        return this.prisma.documentSignatureRequest.findFirstOrThrow({
+          where: { documentId, requestedUserId: userId },
+          select: SIGNATURE_REQUEST_SUMMARY_SELECT,
+        });
+      }
+
+      throw error;
+    }
+  }
+
+  private async getSignatureRequestSummaries(
+    documentId: string,
+  ): Promise<SignatureRequestSummary[]> {
+    return this.prisma.documentSignatureRequest.findMany({
+      where: { documentId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: SIGNATURE_REQUEST_SUMMARY_SELECT,
+    });
+  }
+
+  private countUnsignedSignatureRequestSummaries(
+    requests: SignatureRequestSummary[],
+  ): number {
+    return requests.filter(
+      (request) => request.status !== SignatureRequestStatus.SIGNED,
+    ).length;
+  }
+
+  private async countUnsignedSignatureRequests(
+    documentId: string,
+  ): Promise<number> {
+    return this.prisma.documentSignatureRequest.count({
+      where: {
+        documentId,
+        status: { not: SignatureRequestStatus.SIGNED },
+      },
+    });
+  }
+
+  private async reconcileSignatureRequestForCollaborator(input: {
+    documentId: string;
+    userId: string;
+    permissions: CollaboratorPermission[];
+    invitationStatus: CollaboratorInvitationStatus;
+    acceptedAt: Date | null;
+    isActive: boolean;
+  }): Promise<void> {
+    const document = await this.prisma.document.findUnique({
+      where: { id: input.documentId },
+      select: { ownerId: true, status: true, isDeleted: true },
+    });
+
+    if (
+      !document ||
+      document.isDeleted ||
+      (document.status !== DocumentStatus.FINALISED &&
+        document.status !== DocumentStatus.SIGNED)
+    ) {
+      return;
+    }
+
+    if (this.collaboratorRequiresSignature(input)) {
+      await this.ensureSignatureRequestForUser(
+        input.documentId,
+        document.ownerId,
+        input.userId,
+      );
+      return;
+    }
+
+    await this.removeUnsignedSignatureRequest(input.documentId, input.userId);
+    await this.lockDocumentIfAllRequiredSignaturesComplete(
+      input.documentId,
+      document.ownerId,
+    );
+  }
+
+  private collaboratorRequiresSignature(input: {
+    permissions: CollaboratorPermission[];
+    invitationStatus: CollaboratorInvitationStatus;
+    acceptedAt: Date | null;
+    isActive: boolean;
+  }): boolean {
+    return (
+      input.isActive &&
+      input.acceptedAt !== null &&
+      input.invitationStatus === CollaboratorInvitationStatus.ACCEPTED &&
+      input.permissions.includes(CollaboratorPermission.SIGN)
+    );
+  }
+
+  private async removeUnsignedSignatureRequest(
+    documentId: string,
+    userId: string,
+  ): Promise<void> {
+    await this.prisma.documentSignatureRequest.deleteMany({
+      where: {
+        documentId,
+        requestedUserId: userId,
+        status: { not: SignatureRequestStatus.SIGNED },
+      },
+    });
+  }
+
+  private async lockDocumentIfAllRequiredSignaturesComplete(
+    documentId: string,
+    ownerId: string,
+    fallbackSignedDocumentId?: string,
+  ) {
+    if ((await this.countUnsignedSignatureRequests(documentId)) > 0) {
+      return null;
+    }
+
+    const primarySignature = await this.resolvePrimarySignedDocument(
+      documentId,
+      ownerId,
+      fallbackSignedDocumentId,
+    );
+    if (!primarySignature) return null;
+
+    const signatureSnapshot = await this.buildSignerSnapshot(
+      primarySignature.userId,
+    );
+    await this.prisma.document.updateMany({
+      where: {
+        id: documentId,
+        status: { in: [DocumentStatus.FINALISED, DocumentStatus.SIGNED] },
+      },
+      data: {
+        status: DocumentStatus.LOCKED,
+        personalSignedDocumentId: primarySignature.id,
+        signedAt: primarySignature.signedAt,
+        lockedAt: new Date(),
+        signerDisplayName: signatureSnapshot.signerDisplayName,
+        signatureImageS3Key: signatureSnapshot.signatureImageS3Key,
+        signatureImageMimeType: signatureSnapshot.signatureImageMimeType,
+        signatureImageSizeBytes: signatureSnapshot.signatureImageSizeBytes,
+        signatureBlockX: DEFAULT_SIGNATURE_X,
+        signatureBlockY: DEFAULT_SIGNATURE_Y,
+      },
+    });
+
+    return this.prisma.document.findUnique({ where: { id: documentId } });
+  }
+
+  private async resolvePrimarySignedDocument(
+    documentId: string,
+    ownerId: string,
+    fallbackSignedDocumentId?: string,
+  ): Promise<SignedDocumentForLock | null> {
+    const ownerRequest = await this.prisma.documentSignatureRequest.findFirst({
+      where: {
+        documentId,
+        requestedUserId: ownerId,
+        status: SignatureRequestStatus.SIGNED,
+        personalSignedDocumentId: { not: null },
+      },
+      select: { personalSignedDocumentId: true },
+    });
+    const firstRequest = ownerRequest
+      ? null
+      : await this.prisma.documentSignatureRequest.findFirst({
+          where: {
+            documentId,
+            status: SignatureRequestStatus.SIGNED,
+            personalSignedDocumentId: { not: null },
+          },
+          orderBy: { signedAt: 'asc' },
+          select: { personalSignedDocumentId: true },
+        });
+    const signatureId =
+      ownerRequest?.personalSignedDocumentId ??
+      fallbackSignedDocumentId ??
+      firstRequest?.personalSignedDocumentId ??
+      null;
+
+    if (!signatureId) return null;
+
+    return this.prisma.personalSignedDocument.findUnique({
+      where: { id: signatureId },
+      select: { id: true, userId: true, signedAt: true, certificateId: true },
+    });
+  }
+
+  private async buildSignerSnapshot(userId: string) {
+    const [activeSignatureImage, signer] = await Promise.all([
+      this.prisma.personalSignatureImage.findFirst({
+        where: { userId, isActive: true },
+        select: { s3Key: true, mimeType: true, sizeBytes: true },
+      }),
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          citizenIdentity: {
+            select: { surName: true, postNames: true },
+          },
+        },
+      }),
+    ]);
+
+    return {
+      signerDisplayName:
+        `${signer?.citizenIdentity?.postNames ?? ''} ${signer?.citizenIdentity?.surName ?? ''}`.trim() ||
+        null,
+      signatureImageS3Key: activeSignatureImage?.s3Key ?? null,
+      signatureImageMimeType: activeSignatureImage?.mimeType ?? null,
+      signatureImageSizeBytes: activeSignatureImage?.sizeBytes ?? null,
+    };
   }
 
   private async assertCanManageAccess(

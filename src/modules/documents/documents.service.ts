@@ -1992,8 +1992,7 @@ export class DocumentsService {
 
     if (!document || document.isDeleted)
       throw new NotFoundException('Document not found.');
-    if (document.ownerId !== userId)
-      throw new ForbiddenException('Only the document owner can lock it.');
+    await this.assertCanSign(userId, documentId, document.ownerId);
 
     if (document.status !== 'FINALISED' && document.status !== 'SIGNED') {
       throw new ConflictException(
@@ -2317,6 +2316,23 @@ export class DocumentsService {
       documentId,
       CollaboratorPermission.EDIT,
       'You do not have edit access to this document.',
+    );
+  }
+
+  private async assertCanSign(
+    userId: string,
+    documentId: string,
+    ownerId: string,
+  ) {
+    if (ownerId === userId) {
+      return;
+    }
+
+    await this.assertCollaboratorPermission(
+      userId,
+      documentId,
+      CollaboratorPermission.SIGN,
+      'You do not have signing access to this document.',
     );
   }
 

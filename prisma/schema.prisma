@@ -987,6 +987,7 @@ model DocumentSignatureRequest {
 
   @@index([documentId])
   @@index([requestedUserId])
+  @@unique([documentId, requestedUserId])
   @@map("document_signature_requests")
 }
 

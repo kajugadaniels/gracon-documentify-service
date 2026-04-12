@@ -212,9 +212,41 @@ const SIGNATURE_REQUEST_SUMMARY_SELECT = {
   updatedAt: true,
 } satisfies Prisma.DocumentSignatureRequestSelect;
 
-type SignatureRequestSummary = Prisma.DocumentSignatureRequestGetPayload<{
+const SIGNATURE_REQUEST_PROGRESS_SELECT = {
+  ...SIGNATURE_REQUEST_SUMMARY_SELECT,
+  requestedUser: {
+    select: {
+      id: true,
+      email: true,
+      imageUrl: true,
+      citizenIdentity: {
+        select: { surName: true, postNames: true },
+      },
+    },
+  },
+} satisfies Prisma.DocumentSignatureRequestSelect;
+
+type SignatureRequestBaseRecord = Prisma.DocumentSignatureRequestGetPayload<{
   select: typeof SIGNATURE_REQUEST_SUMMARY_SELECT;
 }>;
+
+type SignatureRequestProgressRecord =
+  Prisma.DocumentSignatureRequestGetPayload<{
+    select: typeof SIGNATURE_REQUEST_PROGRESS_SELECT;
+  }>;
+
+type SignatureRequestUserSummary = {
+  id: string;
+  email: string;
+  imageUrl: string | null;
+  displayName: string;
+  surName: string | null;
+  postNames: string | null;
+};
+
+type SignatureRequestSummary = SignatureRequestBaseRecord & {
+  requestedUser?: SignatureRequestUserSummary | null;
+};
 
 type SignedDocumentForLock = {
   id: string;
@@ -518,9 +550,6 @@ export class DocumentsService {
 
     await this.assertCanRead(userId, documentId, document.ownerId);
 
-    const result: Record<string, unknown> = this.formatDocument(document);
-    result['access'] = this.buildDocumentAccessSummary(userId, document);
-    result['signatureRequests'] = document.signatureRequests;
     const canManageAccess =
       document.ownerId === userId ||
       (await this.hasCollaboratorPermission(
@@ -528,6 +557,11 @@ export class DocumentsService {
         documentId,
         CollaboratorPermission.MANAGE_ACCESS,
       ));
+    const result: Record<string, unknown> = this.formatDocument(document);
+    result['access'] = this.buildDocumentAccessSummary(userId, document);
+    result['signatureRequests'] = canManageAccess
+      ? await this.getSignatureRequestSummaries(documentId, true)
+      : document.signatureRequests;
     result['collaborators'] = canManageAccess
       ? document.collaborators.map((collaborator) =>
           this.formatCollaboratorAccess(collaborator),
@@ -1654,6 +1688,137 @@ export class DocumentsService {
     };
   }
 
+  async sendSignatureReminder(
+    actorUserId: string,
+    documentId: string,
+    requestId: string,
+    context: AccessAuditContext = {},
+  ) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      select: {
+        id: true,
+        ownerId: true,
+        title: true,
+        status: true,
+        isDeleted: true,
+      },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    await this.assertCanManageAccess(actorUserId, documentId, document.ownerId);
+
+    if (document.status !== DocumentStatus.FINALISED) {
+      throw new ConflictException(
+        'Signature reminders can only be sent while a finalised document is waiting for signatures.',
+      );
+    }
+
+    const request = await this.prisma.documentSignatureRequest.findFirst({
+      where: { id: requestId, documentId },
+      select: {
+        id: true,
+        requestedUserId: true,
+        status: true,
+        requestedUser: {
+          select: {
+            email: true,
+            citizenIdentity: {
+              select: { surName: true, postNames: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!request) {
+      throw new NotFoundException('Signature request not found.');
+    }
+
+    if (request.status === SignatureRequestStatus.SIGNED) {
+      throw new ConflictException('This signer has already completed signing.');
+    }
+
+    await this.assertSignatureReminderTargetIsEligible(
+      documentId,
+      document.ownerId,
+      request.requestedUserId,
+    );
+
+    const actor = await this.prisma.user.findUnique({
+      where: { id: actorUserId },
+      select: {
+        email: true,
+        citizenIdentity: {
+          select: { surName: true, postNames: true },
+        },
+      },
+    });
+    const sentAt = new Date();
+
+    try {
+      await this.mailer.sendDocumentSignatureReminderEmail({
+        to: request.requestedUser.email,
+        recipientName: this.formatUserDisplayName(
+          request.requestedUser.citizenIdentity?.postNames ?? null,
+          request.requestedUser.citizenIdentity?.surName ?? null,
+          request.requestedUser.email,
+        ),
+        senderName: this.formatUserDisplayName(
+          actor?.citizenIdentity?.postNames ?? null,
+          actor?.citizenIdentity?.surName ?? null,
+          actor?.email ?? 'A document access manager',
+        ),
+        documentTitle: document.title,
+        signUrl: this.buildDocumentEditUrl(documentId),
+      });
+
+      await this.recordAccessAudit({
+        documentId,
+        collaboratorId: null,
+        actorUserId,
+        targetUserId: request.requestedUserId,
+        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_SENT,
+        fromPermissions: [],
+        toPermissions: [CollaboratorPermission.SIGN],
+        invitationStatus: null,
+        metadata: {
+          signatureReminder: true,
+          requestId: request.id,
+          sentAt: sentAt.toISOString(),
+        },
+        ...context,
+      });
+
+      return { sent: true, requestId: request.id, sentAt };
+    } catch (error) {
+      await this.recordAccessAudit({
+        documentId,
+        collaboratorId: null,
+        actorUserId,
+        targetUserId: request.requestedUserId,
+        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_FAILED,
+        fromPermissions: [],
+        toPermissions: [CollaboratorPermission.SIGN],
+        invitationStatus: null,
+        metadata: {
+          signatureReminder: true,
+          requestId: request.id,
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Signature reminder failed.',
+        },
+        ...context,
+      });
+
+      throw error;
+    }
+  }
+
   async revokeAccess(
     actorUserId: string,
     documentId: string,
@@ -2056,8 +2221,10 @@ export class DocumentsService {
 
       return saved;
     });
-    const signatureRequests =
-      await this.getSignatureRequestSummaries(documentId);
+    const signatureRequests = await this.getSignatureRequestSummaries(
+      documentId,
+      true,
+    );
 
     return {
       ...this.formatDocument(updated),
@@ -2114,6 +2281,13 @@ export class DocumentsService {
         'Signature hash does not match document hash. The signature was created for different content.',
       );
     }
+    const includeSignerProfiles =
+      document.ownerId === userId ||
+      (await this.hasCollaboratorPermission(
+        userId,
+        documentId,
+        CollaboratorPermission.MANAGE_ACCESS,
+      ));
 
     const signatureRequest = await this.ensureSignatureRequestForUser(
       documentId,
@@ -2148,7 +2322,10 @@ export class DocumentsService {
     if (pendingSignatureCount > 0) {
       return {
         ...this.formatDocument(document),
-        signatureRequests: await this.getSignatureRequestSummaries(documentId),
+        signatureRequests: await this.getSignatureRequestSummaries(
+          documentId,
+          includeSignerProfiles,
+        ),
         signatureSnapshot: await this.buildSignatureSnapshot(document),
         signatureId: dto.signatureId,
         pendingSignatureCount,
@@ -2173,7 +2350,10 @@ export class DocumentsService {
       ...this.formatDocument(updated),
       signatureSnapshot: await this.buildSignatureSnapshot(updated),
       signatureId: dto.signatureId,
-      signatureRequests: await this.getSignatureRequestSummaries(documentId),
+      signatureRequests: await this.getSignatureRequestSummaries(
+        documentId,
+        includeSignerProfiles,
+      ),
       pendingSignatureCount: 0,
       message: 'Document locked. It is now permanently immutable.',
     };
@@ -2487,12 +2667,27 @@ export class DocumentsService {
 
   private async getSignatureRequestSummaries(
     documentId: string,
+    includeProfiles = false,
   ): Promise<SignatureRequestSummary[]> {
-    return this.prisma.documentSignatureRequest.findMany({
+    const orderBy = [{ createdAt: 'asc' as const }, { id: 'asc' as const }];
+
+    if (!includeProfiles) {
+      return this.prisma.documentSignatureRequest.findMany({
+        where: { documentId },
+        orderBy,
+        select: SIGNATURE_REQUEST_SUMMARY_SELECT,
+      });
+    }
+
+    const requests = await this.prisma.documentSignatureRequest.findMany({
       where: { documentId },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      select: SIGNATURE_REQUEST_SUMMARY_SELECT,
+      orderBy,
+      select: SIGNATURE_REQUEST_PROGRESS_SELECT,
     });
+
+    return requests.map((request) =>
+      this.formatSignatureRequestSummary(request),
+    );
   }
 
   private countUnsignedSignatureRequestSummaries(
@@ -2577,6 +2772,33 @@ export class DocumentsService {
         status: { not: SignatureRequestStatus.SIGNED },
       },
     });
+  }
+
+  private async assertSignatureReminderTargetIsEligible(
+    documentId: string,
+    ownerId: string,
+    requestedUserId: string,
+  ): Promise<void> {
+    if (requestedUserId === ownerId) {
+      return;
+    }
+
+    const collaborator = await this.prisma.documentCollaborator.findUnique({
+      where: { documentId_userId: { documentId, userId: requestedUserId } },
+      select: {
+        role: true,
+        permissions: true,
+        invitationStatus: true,
+        acceptedAt: true,
+        isActive: true,
+      },
+    });
+
+    if (!this.hasPermission(collaborator, CollaboratorPermission.SIGN)) {
+      throw new ConflictException(
+        'This signer no longer has active signing access to the document.',
+      );
+    }
   }
 
   private async lockDocumentIfAllRequiredSignaturesComplete(
@@ -2943,6 +3165,35 @@ export class DocumentsService {
     };
   }
 
+  private formatSignatureRequestSummary(
+    request: SignatureRequestProgressRecord,
+  ): SignatureRequestSummary {
+    const requestedUser = request.requestedUser;
+
+    return {
+      id: request.id,
+      requestedById: request.requestedById,
+      requestedUserId: request.requestedUserId,
+      status: request.status,
+      personalSignedDocumentId: request.personalSignedDocumentId,
+      signedAt: request.signedAt,
+      createdAt: request.createdAt,
+      updatedAt: request.updatedAt,
+      requestedUser: {
+        id: requestedUser.id,
+        email: requestedUser.email,
+        imageUrl: requestedUser.imageUrl,
+        displayName: this.formatUserDisplayName(
+          requestedUser.citizenIdentity?.postNames ?? null,
+          requestedUser.citizenIdentity?.surName ?? null,
+          requestedUser.email,
+        ),
+        surName: requestedUser.citizenIdentity?.surName ?? null,
+        postNames: requestedUser.citizenIdentity?.postNames ?? null,
+      },
+    };
+  }
+
   private formatDocumentComment(comment: DocumentCommentRecord) {
     return {
       id: comment.id,
@@ -3041,6 +3292,11 @@ export class DocumentsService {
   private buildInvitationUrl(rawToken: string): string {
     const baseUrl = this.resolveDocumentsFrontendUrl();
     return `${baseUrl}/invitations/${encodeURIComponent(rawToken)}`;
+  }
+
+  private buildDocumentEditUrl(documentId: string): string {
+    const baseUrl = this.resolveDocumentsFrontendUrl();
+    return `${baseUrl}/documents/${encodeURIComponent(documentId)}/edit`;
   }
 
   private resolveDocumentsFrontendUrl(): string {

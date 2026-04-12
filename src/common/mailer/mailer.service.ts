@@ -20,6 +20,14 @@ type SendDocumentInvitationEmailParams = {
   expiresIn: string;
 };
 
+type SendDocumentSignatureReminderEmailParams = {
+  to: string;
+  recipientName: string;
+  senderName: string;
+  documentTitle: string;
+  signUrl: string;
+};
+
 @Injectable()
 export class AppMailerService {
   private readonly logger = new Logger(AppMailerService.name);
@@ -62,7 +70,8 @@ export class AppMailerService {
           expiresIn,
           currentYear: new Date().getFullYear(),
           supportEmail:
-            this.configService.get<string>('MAIL_USER') ?? 'support@example.com',
+            this.configService.get<string>('MAIL_USER') ??
+            'support@example.com',
         },
       });
 
@@ -72,6 +81,41 @@ export class AppMailerService {
         `Failed to send document invitation email to ${to}`,
         error,
       );
+      throw error;
+    }
+  }
+
+  /**
+   * Sends a reminder for an already accepted signer who still has to sign.
+   *
+   * Security: the reminder links only to the authenticated editor route and
+   * never includes document content, document hash, or certificate details.
+   */
+  async sendDocumentSignatureReminderEmail(
+    params: SendDocumentSignatureReminderEmailParams,
+  ): Promise<void> {
+    const { to, recipientName, senderName, documentTitle, signUrl } = params;
+
+    try {
+      await this.mailerService.sendMail({
+        to,
+        subject: 'Document signature required',
+        template: 'document-signature-reminder',
+        context: {
+          recipientName,
+          senderName,
+          documentTitle,
+          signUrl,
+          currentYear: new Date().getFullYear(),
+          supportEmail:
+            this.configService.get<string>('MAIL_USER') ??
+            'support@example.com',
+        },
+      });
+
+      this.logger.log('Document signature reminder email sent');
+    } catch (error) {
+      this.logger.error('Failed to send document signature reminder', error);
       throw error;
     }
   }

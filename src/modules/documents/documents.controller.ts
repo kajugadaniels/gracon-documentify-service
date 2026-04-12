@@ -328,6 +328,31 @@ export class DocumentsController {
     );
   }
 
+  @Post(':documentId/signature-requests/:requestId/remind')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiParam({ name: 'requestId', type: String })
+  @ApiOperation({
+    summary:
+      'Send a secure reminder email for a pending required document signature.',
+  })
+  remindSigner(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+    @Param('requestId') requestId: string,
+    @Req() req: Request,
+  ) {
+    return this.service.sendSignatureReminder(
+      user.userId,
+      documentId,
+      requestId,
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') ?? null,
+      },
+    );
+  }
+
   @Patch(':documentId/access/:collaboratorId')
   @HttpCode(HttpStatus.OK)
   @ApiParam({ name: 'documentId', type: String })

@@ -249,6 +249,7 @@ type SignatureRequestUserSummary = {
 
 type SignatureRequestSummary = SignatureRequestBaseRecord & {
   requestedUser?: SignatureRequestUserSummary | null;
+  nextReminderAvailableAt?: Date | null;
 };
 
 type SignedDocumentForLock = {
@@ -1800,7 +1801,14 @@ export class DocumentsService {
         ...context,
       });
 
-      return { sent: true, requestId: request.id, sentAt };
+      return {
+        sent: true,
+        requestId: request.id,
+        sentAt,
+        nextReminderAvailableAt: new Date(
+          sentAt.getTime() + SIGNATURE_REMINDER_COOLDOWN_MS,
+        ),
+      };
     } catch (error) {
       await this.recordAccessAudit({
         documentId,
@@ -2691,9 +2699,13 @@ export class DocumentsService {
       select: SIGNATURE_REQUEST_PROGRESS_SELECT,
     });
 
-    return requests.map((request) =>
-      this.formatSignatureRequestSummary(request),
-    );
+    const reminderCooldowns =
+      await this.getSignatureReminderCooldowns(documentId);
+
+    return requests.map((request) => ({
+      ...this.formatSignatureRequestSummary(request),
+      nextReminderAvailableAt: reminderCooldowns.get(request.id) ?? null,
+    }));
   }
 
   private countUnsignedSignatureRequestSummaries(
@@ -2833,8 +2845,9 @@ export class DocumentsService {
           metadata: true,
         },
       });
-    const recentForRequest = recentReminderEvents.find((event) =>
-      this.isSignatureReminderMetadataForRequest(event.metadata, requestId),
+    const recentForRequest = recentReminderEvents.find(
+      (event) =>
+        this.getSignatureReminderRequestId(event.metadata) === requestId,
     );
 
     if (!recentForRequest) {
@@ -2844,22 +2857,71 @@ export class DocumentsService {
     const retryAt = new Date(
       recentForRequest.createdAt.getTime() + SIGNATURE_REMINDER_COOLDOWN_MS,
     );
+    const retryAfter = Math.max(
+      1,
+      Math.ceil((retryAt.getTime() - Date.now()) / 1000),
+    );
 
     throw new HttpException(
-      `A reminder was already sent recently. Try again after ${retryAt.toISOString()}.`,
+      {
+        statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        error: 'Too Many Requests',
+        code: 'SIGNATURE_REMINDER_COOLDOWN',
+        message: 'A reminder was already sent recently.',
+        retryAt: retryAt.toISOString(),
+        retryAfter,
+      },
       HttpStatus.TOO_MANY_REQUESTS,
     );
   }
 
-  private isSignatureReminderMetadataForRequest(
-    metadata: Prisma.JsonValue | null,
-    requestId: string,
-  ): boolean {
-    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
-      return false;
+  private async getSignatureReminderCooldowns(
+    documentId: string,
+  ): Promise<Map<string, Date>> {
+    const createdAfter = new Date(Date.now() - SIGNATURE_REMINDER_COOLDOWN_MS);
+    const events = await this.prisma.documentAccessAuditLog.findMany({
+      where: {
+        documentId,
+        createdAt: { gte: createdAfter },
+        eventType: {
+          in: [
+            DocumentAccessAuditEvent.SIGNATURE_REMINDER_SENT,
+            DocumentAccessAuditEvent.SIGNATURE_REMINDER_FAILED,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        createdAt: true,
+        metadata: true,
+      },
+    });
+    const cooldowns = new Map<string, Date>();
+
+    for (const event of events) {
+      const requestId = this.getSignatureReminderRequestId(event.metadata);
+      if (!requestId || cooldowns.has(requestId)) {
+        continue;
+      }
+
+      cooldowns.set(
+        requestId,
+        new Date(event.createdAt.getTime() + SIGNATURE_REMINDER_COOLDOWN_MS),
+      );
     }
 
-    return (metadata as Record<string, unknown>)['requestId'] === requestId;
+    return cooldowns;
+  }
+
+  private getSignatureReminderRequestId(
+    metadata: Prisma.JsonValue | null,
+  ): string | null {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      return null;
+    }
+
+    const requestId = (metadata as Record<string, unknown>)['requestId'];
+    return typeof requestId === 'string' ? requestId : null;
   }
 
   private async lockDocumentIfAllRequiredSignaturesComplete(

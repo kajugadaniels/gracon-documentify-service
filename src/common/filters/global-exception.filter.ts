@@ -55,6 +55,15 @@ export class GlobalExceptionFilter implements ExceptionFilter {
           statusCode: HttpStatus.NOT_FOUND,
           message: 'The requested record was not found.',
         };
+      case 'P2007':
+        this.logger.error(
+          `Prisma error ${e.code}`,
+          e.meta ? JSON.stringify(e.meta) : undefined,
+        );
+        return {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: 'A database validation error occurred.',
+        };
       default:
         this.logger.error(`Prisma error ${e.code}`);
         return {

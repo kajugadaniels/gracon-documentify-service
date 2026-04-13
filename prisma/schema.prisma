@@ -56,6 +56,7 @@ model User {
   documentFolders DocumentFolder[]
   documentCollaborators DocumentCollaborator[] @relation("DocumentCollaboratorRecipient")
   documentInvitationsSent DocumentCollaborator[] @relation("DocumentInviteSender")
+  documentInvitationVerificationSessions DocumentInvitationVerificationSession[]
   documentVersions DocumentVersion[]
   documentComments DocumentComment[]
   signatureRequestsReceived DocumentSignatureRequest[] @relation("SignatureRespondent")
@@ -752,6 +753,7 @@ model Document {
   owner         User                    @relation("DocumentOwner",       fields: [ownerId],   references: [id], onDelete: Cascade)
   folder        DocumentFolder?         @relation(fields: [folderId],   references: [id],    onDelete: SetNull)
   collaborators DocumentCollaborator[]
+  invitationVerificationSessions DocumentInvitationVerificationSession[]
   accessAuditLogs DocumentAccessAuditLog[]
   versions      DocumentVersion[]
   comments      DocumentComment[]
@@ -826,6 +828,7 @@ model DocumentCollaborator {
   document            Document                       @relation(fields: [documentId], references: [id], onDelete: Cascade)
   user                User                           @relation("DocumentCollaboratorRecipient", fields: [userId], references: [id], onDelete: Cascade)
   invitedBy           User?                          @relation("DocumentInviteSender", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+  verificationSession DocumentInvitationVerificationSession?
   accessAuditLogs     DocumentAccessAuditLog[]
 
   @@unique([documentId, userId])
@@ -835,6 +838,34 @@ model DocumentCollaborator {
   @@index([invitedByUserId])
   @@index([invitationStatus])
   @@map("document_collaborators")
+}
+
+model DocumentInvitationVerificationSession {
+  id                     String   @id @default(uuid())
+  collaboratorId         String   @unique
+  documentId             String
+  userId                 String
+  emailOtpCodeHash       String?
+  emailOtpSentAt         DateTime?
+  emailOtpExpiresAt      DateTime?
+  emailOtpVerifiedAt     DateTime?
+  emailOtpAttemptCount   Int      @default(0)
+  emailOtpRequestCount   Int      @default(0)
+  emailOtpWindowStartedAt DateTime?
+  identityVerifiedAt     DateTime?
+  completedAt            DateTime?
+  expiresAt              DateTime
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  collaborator           DocumentCollaborator @relation(fields: [collaboratorId], references: [id], onDelete: Cascade)
+  document               Document             @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user                   User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@index([userId, expiresAt])
+  @@index([completedAt])
+  @@map("document_invitation_verification_sessions")
 }
 
 enum CollaboratorRole {
@@ -896,6 +927,10 @@ enum DocumentAccessAuditEvent {
   INVITE_EMAIL_QUEUED
   INVITE_EMAIL_SENT
   INVITE_EMAIL_FAILED
+  INVITE_EMAIL_OTP_REQUIRED
+  INVITE_EMAIL_OTP_SENT
+  INVITE_EMAIL_OTP_FAILED
+  INVITE_EMAIL_OTP_PASSED
   INVITE_OPENED
   AUTH_REQUIRED
   LOGIN_COMPLETED

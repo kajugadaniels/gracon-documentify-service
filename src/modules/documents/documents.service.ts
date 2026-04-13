@@ -7,8 +7,10 @@ import {
   HttpException,
   HttpStatus,
   Logger,
+  UnauthorizedException,
 } from '@nestjs/common';
 import * as crypto from 'crypto';
+import { JwtService } from '@nestjs/jwt';
 import {
   CollaboratorInvitationStatus,
   CollaboratorPermission,
@@ -46,6 +48,11 @@ import {
   type CollaboratorPermissionValue,
 } from './dto/manage-access.dto';
 import { CreateDocumentCommentDto } from './dto/document-comment.dto';
+import {
+  RequestInvitationEmailOtpDto,
+  VerifyInvitationEmailOtpDto,
+} from './dto/invitation-email-otp.dto';
+import type { RequestUser } from '../auth/interfaces/jwt-payload.interface';
 
 // Default empty Tiptap document structure
 const EMPTY_RICH_TEXT_CONTENT = {
@@ -72,6 +79,12 @@ const DEFAULT_SIGNATURE_X = 0.57;
 const DEFAULT_SIGNATURE_Y = 0.78;
 const DEFAULT_INVITATION_EXPIRY_DAYS = 7;
 const SIGNATURE_REMINDER_COOLDOWN_MS = 15 * 60 * 1000;
+const INVITATION_EMAIL_OTP_LENGTH = 6;
+const INVITATION_EMAIL_OTP_EXPIRY_MS = 10 * 60 * 1000;
+const INVITATION_EMAIL_OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+const INVITATION_EMAIL_OTP_MAX_REQUESTS_PER_HOUR = 3;
+const INVITATION_EMAIL_OTP_MAX_ATTEMPTS = 5;
+const INVITATION_VERIFICATION_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const CANONICAL_PERMISSION_ORDER: CollaboratorPermission[] = [
   CollaboratorPermission.READ,
   CollaboratorPermission.COMMENT,
@@ -158,6 +171,25 @@ type InvitationLookupRecord = {
       postNames: string;
     } | null;
   } | null;
+};
+
+type InvitationVerificationSessionRecord = {
+  id: string;
+  collaboratorId: string;
+  documentId: string;
+  userId: string;
+  emailOtpCodeHash: string | null;
+  emailOtpSentAt: Date | null;
+  emailOtpExpiresAt: Date | null;
+  emailOtpVerifiedAt: Date | null;
+  emailOtpAttemptCount: number;
+  emailOtpRequestCount: number;
+  emailOtpWindowStartedAt: Date | null;
+  identityVerifiedAt: Date | null;
+  completedAt: Date | null;
+  expiresAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
 type DocumentAccessCollaboratorSummary = {
@@ -310,6 +342,7 @@ export class DocumentsService {
     private readonly config: ConfigService,
     private readonly encryption: EncryptionService,
     private readonly mailer: AppMailerService,
+    private readonly jwt: JwtService,
   ) {
     this.maxVersions = this.config.get<number>('MAX_VERSIONS_PER_DOCUMENT', 50);
   }
@@ -1966,12 +1999,383 @@ export class DocumentsService {
     };
   }
 
+  async getInvitationGateStatus(
+    rawToken: string,
+    authHeader?: string | null,
+    context: AccessAuditContext = {},
+  ) {
+    const invitation = await this.findInvitationByRawToken(rawToken);
+    await this.recordInvitationOpened(invitation, context);
+
+    const sessionUser = await this.resolveInvitationSessionUser(authHeader);
+    if (!sessionUser) {
+      return {
+        status: 'pending',
+        nextStep: 'login',
+        emailOtp: null,
+        identityVerification: null,
+      };
+    }
+
+    if (invitation.userId !== sessionUser.userId) {
+      throw new ForbiddenException(
+        'This invitation was issued to a different verified account.',
+      );
+    }
+
+    const verificationSession = await this.ensureInvitationVerificationSession(
+      invitation,
+      sessionUser,
+      context,
+    );
+    const syncedSession = await this.syncInvitationIdentityVerification(
+      verificationSession,
+      invitation,
+      sessionUser,
+      context,
+    );
+
+    return this.formatInvitationGateStatus(
+      invitation,
+      syncedSession,
+      sessionUser,
+    );
+  }
+
+  async requestInvitationEmailOtp(
+    rawToken: string,
+    authHeader: string | null | undefined,
+    dto: RequestInvitationEmailOtpDto,
+    context: AccessAuditContext = {},
+  ) {
+    const sessionUser = await this.requireInvitationSessionUser(authHeader);
+    const invitation = await this.getInvitationForRecipient(
+      sessionUser.userId,
+      rawToken,
+    );
+    const verificationSession = await this.ensureInvitationVerificationSession(
+      invitation,
+      sessionUser,
+      context,
+    );
+
+    const normalizedEmail = dto.email.trim().toLowerCase();
+    const invitedEmail = invitation.user.email.trim().toLowerCase();
+    const signedInEmail = sessionUser.email.trim().toLowerCase();
+
+    if (
+      normalizedEmail !== invitedEmail ||
+      normalizedEmail !== signedInEmail
+    ) {
+      await this.recordAccessAudit({
+        documentId: invitation.documentId,
+        collaboratorId: invitation.id,
+        actorUserId: sessionUser.userId,
+        targetUserId: invitation.userId,
+        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_OTP_FAILED,
+        fromPermissions: invitation.permissions,
+        toPermissions: invitation.permissions,
+        invitationStatus: invitation.invitationStatus,
+        metadata: {
+          reason: 'email_mismatch',
+        },
+        ...context,
+      });
+
+      throw new ForbiddenException(
+        'Enter the invited account email before requesting a verification code.',
+      );
+    }
+
+    if (verificationSession.emailOtpVerifiedAt) {
+      const syncedSession = await this.syncInvitationIdentityVerification(
+        verificationSession,
+        invitation,
+        sessionUser,
+        context,
+      );
+
+      return this.formatInvitationGateStatus(
+        invitation,
+        syncedSession,
+        sessionUser,
+      );
+    }
+
+    this.assertInvitationEmailOtpRequestAllowed(verificationSession);
+
+    const rawCode = this.generateInvitationEmailOtp();
+    const issuedAt = new Date();
+    const expiresAt = new Date(
+      issuedAt.getTime() + INVITATION_EMAIL_OTP_EXPIRY_MS,
+    );
+    const requestWindowStartedAt =
+      verificationSession.emailOtpWindowStartedAt &&
+      issuedAt.getTime() -
+        verificationSession.emailOtpWindowStartedAt.getTime() <
+        60 * 60 * 1000
+        ? verificationSession.emailOtpWindowStartedAt
+        : issuedAt;
+    const requestCount =
+      verificationSession.emailOtpWindowStartedAt &&
+      requestWindowStartedAt.getTime() ===
+        verificationSession.emailOtpWindowStartedAt.getTime()
+        ? verificationSession.emailOtpRequestCount + 1
+        : 1;
+
+    const updatedSession =
+      await this.prisma.documentInvitationVerificationSession.update({
+        where: { collaboratorId: invitation.id },
+        data: {
+          emailOtpCodeHash: this.encryption.hash(rawCode),
+          emailOtpSentAt: issuedAt,
+          emailOtpExpiresAt: expiresAt,
+          emailOtpAttemptCount: 0,
+          emailOtpRequestCount: requestCount,
+          emailOtpWindowStartedAt: requestWindowStartedAt,
+        },
+      });
+
+    try {
+      await this.mailer.sendInvitationEmailOtp({
+        to: invitation.user.email,
+        recipientName: this.formatUserDisplayName(
+          invitation.user.citizenIdentity?.postNames ?? null,
+          invitation.user.citizenIdentity?.surName ?? null,
+          invitation.user.email,
+        ),
+        code: rawCode,
+        expiresInMinutes: INVITATION_EMAIL_OTP_EXPIRY_MS / 60_000,
+      });
+    } catch (error) {
+      await this.prisma.documentInvitationVerificationSession.update({
+        where: { collaboratorId: invitation.id },
+        data: {
+          emailOtpCodeHash: null,
+          emailOtpSentAt: null,
+          emailOtpExpiresAt: null,
+        },
+      });
+
+      await this.recordAccessAudit({
+        documentId: invitation.documentId,
+        collaboratorId: invitation.id,
+        actorUserId: sessionUser.userId,
+        targetUserId: invitation.userId,
+        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_OTP_FAILED,
+        fromPermissions: invitation.permissions,
+        toPermissions: invitation.permissions,
+        invitationStatus: invitation.invitationStatus,
+        metadata: {
+          reason: 'delivery_failed',
+        },
+        ...context,
+      });
+
+      throw new HttpException(
+        'Unable to send the verification code right now.',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+
+    await this.recordAccessAudit({
+      documentId: invitation.documentId,
+      collaboratorId: invitation.id,
+      actorUserId: sessionUser.userId,
+      targetUserId: invitation.userId,
+      eventType: DocumentAccessAuditEvent.INVITE_EMAIL_OTP_SENT,
+      fromPermissions: invitation.permissions,
+      toPermissions: invitation.permissions,
+      invitationStatus: invitation.invitationStatus,
+      metadata: {
+        emailOtpSentAt: issuedAt.toISOString(),
+        emailOtpExpiresAt: expiresAt.toISOString(),
+      },
+      ...context,
+    });
+
+    return this.formatInvitationGateStatus(
+      invitation,
+      updatedSession,
+      sessionUser,
+    );
+  }
+
+  async verifyInvitationEmailOtp(
+    rawToken: string,
+    authHeader: string | null | undefined,
+    dto: VerifyInvitationEmailOtpDto,
+    context: AccessAuditContext = {},
+  ) {
+    const sessionUser = await this.requireInvitationSessionUser(authHeader);
+    const invitation = await this.getInvitationForRecipient(
+      sessionUser.userId,
+      rawToken,
+    );
+    const verificationSession = await this.ensureInvitationVerificationSession(
+      invitation,
+      sessionUser,
+      context,
+    );
+
+    if (verificationSession.emailOtpVerifiedAt) {
+      const syncedSession = await this.syncInvitationIdentityVerification(
+        verificationSession,
+        invitation,
+        sessionUser,
+        context,
+      );
+
+      return this.formatInvitationGateStatus(
+        invitation,
+        syncedSession,
+        sessionUser,
+      );
+    }
+
+    if (
+      !verificationSession.emailOtpCodeHash ||
+      !verificationSession.emailOtpExpiresAt
+    ) {
+      throw new BadRequestException(
+        'Request a verification code before continuing.',
+      );
+    }
+
+    if (verificationSession.emailOtpExpiresAt.getTime() <= Date.now()) {
+      await this.prisma.documentInvitationVerificationSession.update({
+        where: { collaboratorId: invitation.id },
+        data: {
+          emailOtpCodeHash: null,
+          emailOtpExpiresAt: null,
+          emailOtpAttemptCount: 0,
+        },
+      });
+
+      await this.recordAccessAudit({
+        documentId: invitation.documentId,
+        collaboratorId: invitation.id,
+        actorUserId: sessionUser.userId,
+        targetUserId: invitation.userId,
+        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_OTP_FAILED,
+        fromPermissions: invitation.permissions,
+        toPermissions: invitation.permissions,
+        invitationStatus: invitation.invitationStatus,
+        metadata: {
+          reason: 'expired',
+        },
+        ...context,
+      });
+
+      throw new BadRequestException(
+        'The verification code has expired. Request a new code.',
+      );
+    }
+
+    if (
+      verificationSession.emailOtpAttemptCount >=
+      INVITATION_EMAIL_OTP_MAX_ATTEMPTS
+    ) {
+      throw new HttpException(
+        'Too many incorrect codes. Request a new verification code.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    if (
+      !this.encryption.compareHash(
+        dto.code,
+        verificationSession.emailOtpCodeHash,
+      )
+    ) {
+      const attempts = verificationSession.emailOtpAttemptCount + 1;
+      await this.prisma.documentInvitationVerificationSession.update({
+        where: { collaboratorId: invitation.id },
+        data: { emailOtpAttemptCount: attempts },
+      });
+
+      await this.recordAccessAudit({
+        documentId: invitation.documentId,
+        collaboratorId: invitation.id,
+        actorUserId: sessionUser.userId,
+        targetUserId: invitation.userId,
+        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_OTP_FAILED,
+        fromPermissions: invitation.permissions,
+        toPermissions: invitation.permissions,
+        invitationStatus: invitation.invitationStatus,
+        metadata: {
+          reason: 'invalid_code',
+          remainingAttempts:
+            Math.max(INVITATION_EMAIL_OTP_MAX_ATTEMPTS - attempts, 0),
+        },
+        ...context,
+      });
+
+      throw new BadRequestException('Incorrect verification code.');
+    }
+
+    const verifiedAt = new Date();
+    const updatedSession =
+      await this.prisma.documentInvitationVerificationSession.update({
+        where: { collaboratorId: invitation.id },
+        data: {
+          emailOtpCodeHash: null,
+          emailOtpExpiresAt: null,
+          emailOtpAttemptCount: 0,
+          emailOtpVerifiedAt: verifiedAt,
+        },
+      });
+
+    await this.recordAccessAudit({
+      documentId: invitation.documentId,
+      collaboratorId: invitation.id,
+      actorUserId: sessionUser.userId,
+      targetUserId: invitation.userId,
+      eventType: DocumentAccessAuditEvent.INVITE_EMAIL_OTP_PASSED,
+      fromPermissions: invitation.permissions,
+      toPermissions: invitation.permissions,
+      invitationStatus: invitation.invitationStatus,
+      metadata: {
+        emailOtpVerifiedAt: verifiedAt.toISOString(),
+      },
+      ...context,
+    });
+
+    if (!sessionUser.isIdVerified) {
+      await this.recordAccessAudit({
+        documentId: invitation.documentId,
+        collaboratorId: invitation.id,
+        actorUserId: sessionUser.userId,
+        targetUserId: invitation.userId,
+        eventType: DocumentAccessAuditEvent.IDENTITY_VERIFICATION_REQUIRED,
+        fromPermissions: invitation.permissions,
+        toPermissions: invitation.permissions,
+        invitationStatus: invitation.invitationStatus,
+        metadata: null,
+        ...context,
+      });
+    }
+
+    const syncedSession = await this.syncInvitationIdentityVerification(
+      updatedSession,
+      invitation,
+      sessionUser,
+      context,
+    );
+
+    return this.formatInvitationGateStatus(
+      invitation,
+      syncedSession,
+      sessionUser,
+    );
+  }
+
   async getInvitationReview(
     userId: string,
     rawToken: string,
     context: AccessAuditContext = {},
   ) {
-    const invitation = await this.getInvitationForRecipient(userId, rawToken);
+    const invitation = await this.getInvitationForCompletedReview(userId, rawToken);
     await this.recordInvitationOpened(invitation, context);
 
     return {
@@ -2006,7 +2410,7 @@ export class DocumentsService {
     rawToken: string,
     context: AccessAuditContext = {},
   ) {
-    const invitation = await this.getInvitationForRecipient(userId, rawToken);
+    const invitation = await this.getInvitationForCompletedReview(userId, rawToken);
     const acceptedAt = new Date();
 
     const accepted = await this.prisma.documentCollaborator.update({
@@ -3538,6 +3942,359 @@ export class DocumentsService {
     return Math.min(Math.max(parsed, 1), 100);
   }
 
+  private extractBearerToken(authHeader?: string | null): string | null {
+    if (!authHeader) {
+      return null;
+    }
+
+    const [scheme, token] = authHeader.split(' ');
+    if (scheme !== 'Bearer' || !token) {
+      return null;
+    }
+
+    return token.trim() || null;
+  }
+
+  private async resolveInvitationSessionUser(
+    authHeader?: string | null,
+  ): Promise<RequestUser | null> {
+    const token = this.extractBearerToken(authHeader);
+    if (!token) {
+      return null;
+    }
+
+    let payload: { sub: string; email: string; tokenType: 'full' | 'limited' };
+
+    try {
+      payload = await this.jwt.verifyAsync<{
+        sub: string;
+        email: string;
+        tokenType: 'full' | 'limited';
+      }>(token);
+    } catch {
+      throw new UnauthorizedException('Your session is invalid. Please sign in again.');
+    }
+
+    if (payload.tokenType !== 'full' && payload.tokenType !== 'limited') {
+      throw new UnauthorizedException('Your session is invalid. Please sign in again.');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { id: true, email: true, isActive: true, isIdVerified: true },
+    });
+
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('Your account is not active.');
+    }
+
+    return {
+      userId: user.id,
+      email: user.email,
+      tokenType: payload.tokenType,
+      isIdVerified: user.isIdVerified,
+    };
+  }
+
+  private async requireInvitationSessionUser(
+    authHeader?: string | null,
+  ): Promise<RequestUser> {
+    const user = await this.resolveInvitationSessionUser(authHeader);
+    if (!user) {
+      throw new UnauthorizedException('Sign in to continue this invitation.');
+    }
+
+    return user;
+  }
+
+  private resolveInvitationVerificationSessionExpiry(
+    invitation: InvitationLookupRecord,
+  ) {
+    const maxExpiry = new Date(
+      Date.now() + INVITATION_VERIFICATION_SESSION_TTL_MS,
+    );
+
+    if (
+      invitation.invitationExpiresAt &&
+      invitation.invitationExpiresAt.getTime() < maxExpiry.getTime()
+    ) {
+      return invitation.invitationExpiresAt;
+    }
+
+    return maxExpiry;
+  }
+
+  private async ensureInvitationVerificationSession(
+    invitation: InvitationLookupRecord,
+    sessionUser: RequestUser,
+    context: AccessAuditContext,
+  ): Promise<InvitationVerificationSessionRecord> {
+    const existing =
+      await this.prisma.documentInvitationVerificationSession.findUnique({
+        where: { collaboratorId: invitation.id },
+      });
+
+    if (existing && existing.expiresAt.getTime() > Date.now()) {
+      return existing;
+    }
+
+    const expiresAt = this.resolveInvitationVerificationSessionExpiry(invitation);
+
+    const session = existing
+      ? await this.prisma.documentInvitationVerificationSession.update({
+          where: { collaboratorId: invitation.id },
+          data: {
+            userId: invitation.userId,
+            documentId: invitation.documentId,
+            emailOtpCodeHash: null,
+            emailOtpSentAt: null,
+            emailOtpExpiresAt: null,
+            emailOtpVerifiedAt: null,
+            emailOtpAttemptCount: 0,
+            emailOtpRequestCount: 0,
+            emailOtpWindowStartedAt: null,
+            identityVerifiedAt: null,
+            completedAt: null,
+            expiresAt,
+          },
+        })
+      : await this.prisma.documentInvitationVerificationSession.create({
+          data: {
+            collaboratorId: invitation.id,
+            documentId: invitation.documentId,
+            userId: invitation.userId,
+            expiresAt,
+          },
+        });
+
+    await this.recordAccessAudit({
+      documentId: invitation.documentId,
+      collaboratorId: invitation.id,
+      actorUserId: sessionUser.userId,
+      targetUserId: invitation.userId,
+      eventType: DocumentAccessAuditEvent.LOGIN_COMPLETED,
+      fromPermissions: invitation.permissions,
+      toPermissions: invitation.permissions,
+      invitationStatus: invitation.invitationStatus,
+      metadata: {
+        tokenType: sessionUser.tokenType,
+      },
+      ...context,
+    });
+
+    await this.recordAccessAudit({
+      documentId: invitation.documentId,
+      collaboratorId: invitation.id,
+      actorUserId: sessionUser.userId,
+      targetUserId: invitation.userId,
+      eventType: DocumentAccessAuditEvent.INVITE_EMAIL_OTP_REQUIRED,
+      fromPermissions: invitation.permissions,
+      toPermissions: invitation.permissions,
+      invitationStatus: invitation.invitationStatus,
+      metadata: null,
+      ...context,
+    });
+
+    return session;
+  }
+
+  private resolveInvitationEmailOtpResendAvailableAt(
+    session: InvitationVerificationSessionRecord,
+  ): Date | null {
+    if (!session.emailOtpSentAt) {
+      return null;
+    }
+
+    return new Date(
+      session.emailOtpSentAt.getTime() +
+        INVITATION_EMAIL_OTP_RESEND_COOLDOWN_MS,
+    );
+  }
+
+  private assertInvitationEmailOtpRequestAllowed(
+    session: InvitationVerificationSessionRecord,
+  ) {
+    const now = Date.now();
+    const resendAvailableAt =
+      this.resolveInvitationEmailOtpResendAvailableAt(session);
+
+    if (resendAvailableAt && resendAvailableAt.getTime() > now) {
+      throw new HttpException({
+        message: 'Wait before requesting another verification code.',
+        retryAt: resendAvailableAt.toISOString(),
+        retryAfterSeconds: Math.ceil(
+          (resendAvailableAt.getTime() - now) / 1000,
+        ),
+      }, HttpStatus.TOO_MANY_REQUESTS);
+    }
+
+    const isInActiveWindow =
+      session.emailOtpWindowStartedAt &&
+      now - session.emailOtpWindowStartedAt.getTime() < 60 * 60 * 1000;
+
+    if (
+      isInActiveWindow &&
+      session.emailOtpRequestCount >= INVITATION_EMAIL_OTP_MAX_REQUESTS_PER_HOUR
+    ) {
+      const retryAt = new Date(
+        session.emailOtpWindowStartedAt!.getTime() + 60 * 60 * 1000,
+      );
+      throw new HttpException({
+        message:
+          'Too many verification codes have been requested. Try again later.',
+        retryAt: retryAt.toISOString(),
+        retryAfterSeconds: Math.ceil((retryAt.getTime() - now) / 1000),
+      }, HttpStatus.TOO_MANY_REQUESTS);
+    }
+  }
+
+  private generateInvitationEmailOtp() {
+    return crypto
+      .randomInt(0, 10 ** INVITATION_EMAIL_OTP_LENGTH)
+      .toString()
+      .padStart(INVITATION_EMAIL_OTP_LENGTH, '0');
+  }
+
+  private async syncInvitationIdentityVerification(
+    session: InvitationVerificationSessionRecord,
+    invitation: InvitationLookupRecord,
+    sessionUser: RequestUser,
+    context: AccessAuditContext,
+  ): Promise<InvitationVerificationSessionRecord> {
+    if (!session.emailOtpVerifiedAt || session.completedAt) {
+      return session;
+    }
+
+    if (!sessionUser.isIdVerified) {
+      return session;
+    }
+
+    const verifiedAt = new Date();
+    const updated = await this.prisma.documentInvitationVerificationSession.update(
+      {
+        where: { collaboratorId: invitation.id },
+        data: {
+          identityVerifiedAt: session.identityVerifiedAt ?? verifiedAt,
+          completedAt: verifiedAt,
+        },
+      },
+    );
+
+    if (!session.identityVerifiedAt) {
+      await this.recordAccessAudit({
+        documentId: invitation.documentId,
+        collaboratorId: invitation.id,
+        actorUserId: sessionUser.userId,
+        targetUserId: invitation.userId,
+        eventType: DocumentAccessAuditEvent.IDENTITY_VERIFICATION_PASSED,
+        fromPermissions: invitation.permissions,
+        toPermissions: invitation.permissions,
+        invitationStatus: invitation.invitationStatus,
+        metadata: {
+          identityVerifiedAt: verifiedAt.toISOString(),
+        },
+        ...context,
+      });
+    }
+
+    return updated;
+  }
+
+  private formatInvitationGateStatus(
+    invitation: InvitationLookupRecord,
+    session: InvitationVerificationSessionRecord,
+    sessionUser: RequestUser,
+  ) {
+    const resendAvailableAt =
+      this.resolveInvitationEmailOtpResendAvailableAt(session);
+    const nextStep = !session.emailOtpVerifiedAt
+      ? 'email_otp'
+      : session.completedAt
+        ? 'review'
+        : 'identity_verification';
+
+    return {
+      status: 'pending' as const,
+      nextStep,
+      recipient: {
+        email: invitation.user.email,
+        displayName: this.formatUserDisplayName(
+          invitation.user.citizenIdentity?.postNames ?? null,
+          invitation.user.citizenIdentity?.surName ?? null,
+          invitation.user.email,
+        ),
+      },
+      signedInUser: {
+        email: sessionUser.email,
+        tokenType: sessionUser.tokenType,
+        isIdVerified: sessionUser.isIdVerified,
+      },
+      emailOtp: {
+        required: !session.emailOtpVerifiedAt,
+        sentAt: session.emailOtpSentAt,
+        expiresAt: session.emailOtpExpiresAt,
+        verifiedAt: session.emailOtpVerifiedAt,
+        resendAvailableAt,
+      },
+      identityVerification: {
+        required: !!session.emailOtpVerifiedAt && !session.completedAt,
+        verifiedAt: session.identityVerifiedAt,
+      },
+    };
+  }
+
+  private async getInvitationForCompletedReview(
+    userId: string,
+    rawToken: string,
+  ): Promise<InvitationLookupRecord> {
+    const invitation = await this.getInvitationForRecipient(userId, rawToken);
+    const session =
+      await this.prisma.documentInvitationVerificationSession.findUnique({
+        where: { collaboratorId: invitation.id },
+      });
+
+    if (!session || !session.emailOtpVerifiedAt) {
+      throw new ForbiddenException(
+        'Complete the invitation email verification step before continuing.',
+      );
+    }
+
+    if (session.expiresAt.getTime() <= Date.now()) {
+      throw new ForbiddenException(
+        'This invitation verification session expired. Restart the verification steps.',
+      );
+    }
+
+    if (!session.completedAt) {
+      const completedAt = new Date();
+      await this.prisma.documentInvitationVerificationSession.update({
+        where: { collaboratorId: invitation.id },
+        data: {
+          identityVerifiedAt: session.identityVerifiedAt ?? completedAt,
+          completedAt,
+        },
+      });
+
+      if (!session.identityVerifiedAt) {
+        await this.recordAccessAudit({
+          documentId: invitation.documentId,
+          collaboratorId: invitation.id,
+          actorUserId: invitation.userId,
+          targetUserId: invitation.userId,
+          eventType: DocumentAccessAuditEvent.IDENTITY_VERIFICATION_PASSED,
+          fromPermissions: invitation.permissions,
+          toPermissions: invitation.permissions,
+          invitationStatus: invitation.invitationStatus,
+          metadata: {
+            identityVerifiedAt: completedAt.toISOString(),
+          },
+        });
+      }
+    }
+
+    return invitation;
+  }
+
   private sanitizeAccessAuditMetadata(
     metadata: Prisma.JsonValue | null,
   ): Record<string, unknown> | null {
@@ -3552,17 +4309,26 @@ export class DocumentsService {
       'commentId',
       'completedSignatureCount',
       'declinedAt',
+      'emailOtpExpiresAt',
+      'emailOtpSentAt',
+      'emailOtpVerifiedAt',
       'expiresAt',
+      'identityVerifiedAt',
       'lockedAt',
       'notePresent',
       'openedAt',
       'pendingSignatureCount',
       'parentCommentId',
       'previousStatus',
+      'reason',
+      'remainingAttempts',
       'resent',
+      'retryAfterSeconds',
+      'retryAt',
       'resolvedAt',
       'sentAt',
       'signingOrder',
+      'tokenType',
       'totalRequired',
       'totalSigned',
     ];

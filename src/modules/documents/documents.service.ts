@@ -185,6 +185,8 @@ type InvitationVerificationSessionRecord = {
   emailOtpAttemptCount: number;
   emailOtpRequestCount: number;
   emailOtpWindowStartedAt: Date | null;
+  identityChallengeStartedAt: Date | null;
+  identityVerificationAttemptId: string | null;
   identityVerifiedAt: Date | null;
   completedAt: Date | null;
   expiresAt: Date;
@@ -2031,7 +2033,7 @@ export class DocumentsService {
     const syncedSession = await this.syncInvitationIdentityVerification(
       verificationSession,
       invitation,
-      sessionUser,
+      sessionUser.userId,
       context,
     );
 
@@ -2088,10 +2090,16 @@ export class DocumentsService {
     }
 
     if (verificationSession.emailOtpVerifiedAt) {
-      const syncedSession = await this.syncInvitationIdentityVerification(
+      const challengedSession = await this.beginInvitationIdentityChallenge(
         verificationSession,
         invitation,
-        sessionUser,
+        sessionUser.userId,
+        context,
+      );
+      const syncedSession = await this.syncInvitationIdentityVerification(
+        challengedSession,
+        invitation,
+        sessionUser.userId,
         context,
       );
 
@@ -2222,7 +2230,7 @@ export class DocumentsService {
       const syncedSession = await this.syncInvitationIdentityVerification(
         verificationSession,
         invitation,
-        sessionUser,
+        sessionUser.userId,
         context,
       );
 
@@ -2315,7 +2323,7 @@ export class DocumentsService {
     }
 
     const verifiedAt = new Date();
-    const updatedSession =
+    const emailVerifiedSession =
       await this.prisma.documentInvitationVerificationSession.update({
         where: { collaboratorId: invitation.id },
         data: {
@@ -2341,25 +2349,17 @@ export class DocumentsService {
       ...context,
     });
 
-    if (!sessionUser.isIdVerified) {
-      await this.recordAccessAudit({
-        documentId: invitation.documentId,
-        collaboratorId: invitation.id,
-        actorUserId: sessionUser.userId,
-        targetUserId: invitation.userId,
-        eventType: DocumentAccessAuditEvent.IDENTITY_VERIFICATION_REQUIRED,
-        fromPermissions: invitation.permissions,
-        toPermissions: invitation.permissions,
-        invitationStatus: invitation.invitationStatus,
-        metadata: null,
-        ...context,
-      });
-    }
+    const challengedSession = await this.beginInvitationIdentityChallenge(
+      emailVerifiedSession,
+      invitation,
+      sessionUser.userId,
+      context,
+    );
 
     const syncedSession = await this.syncInvitationIdentityVerification(
-      updatedSession,
+      challengedSession,
       invitation,
-      sessionUser,
+      sessionUser.userId,
       context,
     );
 
@@ -4049,13 +4049,15 @@ export class DocumentsService {
             emailOtpCodeHash: null,
             emailOtpSentAt: null,
             emailOtpExpiresAt: null,
-            emailOtpVerifiedAt: null,
-            emailOtpAttemptCount: 0,
-            emailOtpRequestCount: 0,
-            emailOtpWindowStartedAt: null,
-            identityVerifiedAt: null,
-            completedAt: null,
-            expiresAt,
+          emailOtpVerifiedAt: null,
+          emailOtpAttemptCount: 0,
+          emailOtpRequestCount: 0,
+          emailOtpWindowStartedAt: null,
+          identityChallengeStartedAt: null,
+          identityVerificationAttemptId: null,
+          identityVerifiedAt: null,
+          completedAt: null,
+          expiresAt,
           },
         })
       : await this.prisma.documentInvitationVerificationSession.create({
@@ -4155,43 +4157,101 @@ export class DocumentsService {
       .padStart(INVITATION_EMAIL_OTP_LENGTH, '0');
   }
 
-  private async syncInvitationIdentityVerification(
+  private async beginInvitationIdentityChallenge(
     session: InvitationVerificationSessionRecord,
     invitation: InvitationLookupRecord,
-    sessionUser: RequestUser,
+    actorUserId: string,
     context: AccessAuditContext,
   ): Promise<InvitationVerificationSessionRecord> {
-    if (!session.emailOtpVerifiedAt || session.completedAt) {
+    if (session.identityChallengeStartedAt) {
       return session;
     }
 
-    if (!sessionUser.isIdVerified) {
-      return session;
-    }
-
-    const verifiedAt = new Date();
+    const challengeStartedAt = new Date();
     const updated = await this.prisma.documentInvitationVerificationSession.update(
       {
         where: { collaboratorId: invitation.id },
         data: {
-          identityVerifiedAt: session.identityVerifiedAt ?? verifiedAt,
-          completedAt: verifiedAt,
+          identityChallengeStartedAt: challengeStartedAt,
+          identityVerificationAttemptId: null,
+          identityVerifiedAt: null,
+          completedAt: null,
         },
       },
     );
 
-    if (!session.identityVerifiedAt) {
+    await this.recordAccessAudit({
+      documentId: invitation.documentId,
+      collaboratorId: invitation.id,
+      actorUserId,
+      targetUserId: invitation.userId,
+      eventType: DocumentAccessAuditEvent.IDENTITY_VERIFICATION_REQUIRED,
+      fromPermissions: invitation.permissions,
+      toPermissions: invitation.permissions,
+      invitationStatus: invitation.invitationStatus,
+      metadata: {
+        identityChallengeStartedAt: challengeStartedAt.toISOString(),
+      },
+      ...context,
+    });
+
+    return updated;
+  }
+
+  private async syncInvitationIdentityVerification(
+    session: InvitationVerificationSessionRecord,
+    invitation: InvitationLookupRecord,
+    actorUserId: string,
+    context: AccessAuditContext,
+  ): Promise<InvitationVerificationSessionRecord> {
+    if (
+      !session.emailOtpVerifiedAt ||
+      !session.identityChallengeStartedAt ||
+      session.completedAt
+    ) {
+      return session;
+    }
+
+    const passedAttempt = await this.prisma.idVerification.findFirst({
+      where: {
+        userId: invitation.userId,
+        passed: true,
+        createdAt: { gte: session.identityChallengeStartedAt },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, createdAt: true },
+    });
+
+    if (!passedAttempt) {
+      return session;
+    }
+
+    const updated = await this.prisma.documentInvitationVerificationSession.update(
+      {
+        where: { collaboratorId: invitation.id },
+        data: {
+          identityVerificationAttemptId: passedAttempt.id,
+          identityVerifiedAt: passedAttempt.createdAt,
+          completedAt: passedAttempt.createdAt,
+        },
+      },
+    );
+
+    if (!session.identityVerificationAttemptId) {
       await this.recordAccessAudit({
         documentId: invitation.documentId,
         collaboratorId: invitation.id,
-        actorUserId: sessionUser.userId,
+        actorUserId,
         targetUserId: invitation.userId,
         eventType: DocumentAccessAuditEvent.IDENTITY_VERIFICATION_PASSED,
         fromPermissions: invitation.permissions,
         toPermissions: invitation.permissions,
         invitationStatus: invitation.invitationStatus,
         metadata: {
-          identityVerifiedAt: verifiedAt.toISOString(),
+          identityChallengeStartedAt:
+            session.identityChallengeStartedAt.toISOString(),
+          identityVerificationAttemptId: passedAttempt.id,
+          identityVerifiedAt: passedAttempt.createdAt.toISOString(),
         },
         ...context,
       });
@@ -4238,6 +4298,8 @@ export class DocumentsService {
       },
       identityVerification: {
         required: !!session.emailOtpVerifiedAt && !session.completedAt,
+        challengeStartedAt: session.identityChallengeStartedAt,
+        verificationAttemptId: session.identityVerificationAttemptId,
         verifiedAt: session.identityVerifiedAt,
       },
     };
@@ -4265,31 +4327,23 @@ export class DocumentsService {
       );
     }
 
-    if (!session.completedAt) {
-      const completedAt = new Date();
-      await this.prisma.documentInvitationVerificationSession.update({
-        where: { collaboratorId: invitation.id },
-        data: {
-          identityVerifiedAt: session.identityVerifiedAt ?? completedAt,
-          completedAt,
-        },
-      });
+    const challengedSession = await this.beginInvitationIdentityChallenge(
+      session,
+      invitation,
+      invitation.userId,
+      {},
+    );
+    const syncedSession = await this.syncInvitationIdentityVerification(
+      challengedSession,
+      invitation,
+      invitation.userId,
+      {},
+    );
 
-      if (!session.identityVerifiedAt) {
-        await this.recordAccessAudit({
-          documentId: invitation.documentId,
-          collaboratorId: invitation.id,
-          actorUserId: invitation.userId,
-          targetUserId: invitation.userId,
-          eventType: DocumentAccessAuditEvent.IDENTITY_VERIFICATION_PASSED,
-          fromPermissions: invitation.permissions,
-          toPermissions: invitation.permissions,
-          invitationStatus: invitation.invitationStatus,
-          metadata: {
-            identityVerifiedAt: completedAt.toISOString(),
-          },
-        });
-      }
+    if (!syncedSession.completedAt) {
+      throw new ForbiddenException(
+        'Complete the invitation identity verification step before continuing.',
+      );
     }
 
     return invitation;
@@ -4313,6 +4367,8 @@ export class DocumentsService {
       'emailOtpSentAt',
       'emailOtpVerifiedAt',
       'expiresAt',
+      'identityChallengeStartedAt',
+      'identityVerificationAttemptId',
       'identityVerifiedAt',
       'lockedAt',
       'notePresent',

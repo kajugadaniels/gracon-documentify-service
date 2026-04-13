@@ -2376,6 +2376,10 @@ export class DocumentsService {
     context: AccessAuditContext = {},
   ) {
     const invitation = await this.getInvitationForCompletedReview(userId, rawToken);
+    const verificationSession =
+      await this.prisma.documentInvitationVerificationSession.findUnique({
+        where: { collaboratorId: invitation.id },
+      });
     await this.recordInvitationOpened(invitation, context);
 
     return {
@@ -2401,6 +2405,15 @@ export class DocumentsService {
           invitation.user.citizenIdentity?.surName ?? null,
           invitation.user.email,
         ),
+      },
+      verification: {
+        emailOtpVerifiedAt: verificationSession?.emailOtpVerifiedAt ?? null,
+        identityChallengeStartedAt:
+          verificationSession?.identityChallengeStartedAt ?? null,
+        identityVerificationAttemptId:
+          verificationSession?.identityVerificationAttemptId ?? null,
+        identityVerifiedAt: verificationSession?.identityVerifiedAt ?? null,
+        completedAt: verificationSession?.completedAt ?? null,
       },
     };
   }

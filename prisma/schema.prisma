@@ -853,6 +853,7 @@ model DocumentInvitationVerificationSession {
   emailOtpRequestCount   Int      @default(0)
   emailOtpWindowStartedAt DateTime?
   identityChallengeStartedAt DateTime?
+  identityFailureAttemptId String?
   identityVerificationAttemptId String?
   identityVerifiedAt     DateTime?
   completedAt            DateTime?

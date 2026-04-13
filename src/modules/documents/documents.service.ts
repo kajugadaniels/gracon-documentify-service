@@ -229,6 +229,9 @@ const SIGNATURE_REQUEST_PROGRESS_SELECT = {
   },
 } satisfies Prisma.DocumentSignatureRequestSelect;
 
+const COMPLETED_SIGNATURE_SELECT =
+  SIGNATURE_REQUEST_PROGRESS_SELECT satisfies Prisma.DocumentSignatureRequestSelect;
+
 type SignatureRequestBaseRecord = Prisma.DocumentSignatureRequestGetPayload<{
   select: typeof SIGNATURE_REQUEST_SUMMARY_SELECT;
 }>;
@@ -237,6 +240,10 @@ type SignatureRequestProgressRecord =
   Prisma.DocumentSignatureRequestGetPayload<{
     select: typeof SIGNATURE_REQUEST_PROGRESS_SELECT;
   }>;
+
+type CompletedSignatureRecord = Prisma.DocumentSignatureRequestGetPayload<{
+  select: typeof COMPLETED_SIGNATURE_SELECT;
+}>;
 
 type SignatureRequestUserSummary = {
   id: string;
@@ -257,6 +264,19 @@ type SignedDocumentForLock = {
   userId: string;
   signedAt: Date;
   certificateId: string;
+};
+
+type CompletedSignatureSummary = {
+  signatureId: string;
+  certificateId: string | null;
+  signerId: string;
+  signerName: string;
+  signerEmail: string;
+  imageUrl: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  signedAt: Date;
+  isOwner: boolean;
 };
 
 // Backward-compat: derive x/y from old alignment enum for documents
@@ -584,6 +604,10 @@ export class DocumentsService {
     }
 
     result['signatureSnapshot'] = await this.buildSignatureSnapshot(document);
+    result['completedSignatures'] = await this.getCompletedSignatureSummaries(
+      documentId,
+      document.ownerId,
+    );
 
     return result;
   }
@@ -2353,6 +2377,10 @@ export class DocumentsService {
           includeSignerProfiles,
         ),
         signatureSnapshot: await this.buildSignatureSnapshot(updated ?? document),
+        completedSignatures: await this.getCompletedSignatureSummaries(
+          documentId,
+          document.ownerId,
+        ),
         signatureId: dto.signatureId,
         pendingSignatureCount,
         message:
@@ -2373,6 +2401,10 @@ export class DocumentsService {
       signatureRequests: await this.getSignatureRequestSummaries(
         documentId,
         includeSignerProfiles,
+      ),
+      completedSignatures: await this.getCompletedSignatureSummaries(
+        documentId,
+        document.ownerId,
       ),
       pendingSignatureCount: 0,
       message:
@@ -2459,6 +2491,10 @@ export class DocumentsService {
       signatureRequests: await this.getSignatureRequestSummaries(
         documentId,
         true,
+      ),
+      completedSignatures: await this.getCompletedSignatureSummaries(
+        documentId,
+        document.ownerId,
       ),
       pendingSignatureCount: 0,
       message: 'Document locked. It is now permanently immutable.',
@@ -3108,6 +3144,76 @@ export class DocumentsService {
       signatureImageS3Key: activeSignatureImage?.s3Key ?? null,
       signatureImageMimeType: activeSignatureImage?.mimeType ?? null,
       signatureImageSizeBytes: activeSignatureImage?.sizeBytes ?? null,
+    };
+  }
+
+  private async getCompletedSignatureSummaries(
+    documentId: string,
+    ownerId: string,
+  ): Promise<CompletedSignatureSummary[]> {
+    const requests = await this.prisma.documentSignatureRequest.findMany({
+      where: {
+        documentId,
+        status: SignatureRequestStatus.SIGNED,
+        personalSignedDocumentId: { not: null },
+        signedAt: { not: null },
+      },
+      orderBy: { signedAt: 'asc' },
+      select: COMPLETED_SIGNATURE_SELECT,
+    });
+
+    return Promise.all(
+      requests.map((request) =>
+        this.formatCompletedSignatureSummary(request, ownerId),
+      ),
+    );
+  }
+
+  private async formatCompletedSignatureSummary(
+    request: CompletedSignatureRecord,
+    ownerId: string,
+  ): Promise<CompletedSignatureSummary> {
+    const [signerSnapshot, signedDocument] = await Promise.all([
+      this.buildSignerSnapshot(request.requestedUserId),
+      request.personalSignedDocumentId
+        ? this.prisma.personalSignedDocument.findUnique({
+            where: { id: request.personalSignedDocumentId },
+            select: { certificateId: true },
+          })
+        : Promise.resolve(null),
+    ]);
+    let imageUrl: string | null = null;
+
+    if (signerSnapshot.signatureImageS3Key) {
+      try {
+        imageUrl = await this.s3.getPresignedUrl(
+          signerSnapshot.signatureImageS3Key,
+          3600,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Failed to create completed signature URL for request ${request.id}: ${String(error)}`,
+        );
+      }
+    }
+
+    return {
+      signatureId: request.personalSignedDocumentId ?? request.id,
+      certificateId: signedDocument?.certificateId ?? null,
+      signerId: request.requestedUserId,
+      signerName:
+        signerSnapshot.signerDisplayName ??
+        this.formatUserDisplayName(
+          request.requestedUser.citizenIdentity?.postNames ?? null,
+          request.requestedUser.citizenIdentity?.surName ?? null,
+          request.requestedUser.email,
+        ),
+      signerEmail: request.requestedUser.email,
+      imageUrl,
+      mimeType: signerSnapshot.signatureImageMimeType,
+      sizeBytes: signerSnapshot.signatureImageSizeBytes,
+      signedAt: request.signedAt ?? request.updatedAt,
+      isOwner: request.requestedUserId === ownerId,
     };
   }
 

@@ -35,7 +35,7 @@ import {
   UpdateSignatureLayoutDto,
 } from './dto/update-document.dto';
 import { FinaliseDocumentDto } from './dto/finalise-document.dto';
-import { LockDocumentDto } from './dto/lock-document.dto';
+import { SignDocumentDto } from './dto/sign-document.dto';
 import {
   QueryDocumentsDto,
   type DocumentListScope,
@@ -1901,10 +1901,7 @@ export class DocumentsService {
     });
 
     await this.removeUnsignedSignatureRequest(documentId, collaborator.userId);
-    await this.lockDocumentIfAllRequiredSignaturesComplete(
-      documentId,
-      document.ownerId,
-    );
+    await this.syncDocumentSigningStatus(documentId);
 
     return { revoked: true, collaboratorId: collaborator.id };
   }
@@ -2105,6 +2102,7 @@ export class DocumentsService {
       invitation.documentId,
       invitation.userId,
     );
+    await this.syncDocumentSigningStatus(invitation.documentId);
 
     return {
       declined: true,
@@ -2258,9 +2256,9 @@ export class DocumentsService {
     };
   }
 
-  // ─── Lock (called after signing is complete) ──────────────────────────────────
+  // ─── Sign ────────────────────────────────────────────────────────────────────
 
-  async lock(userId: string, documentId: string, dto: LockDocumentDto) {
+  async sign(userId: string, documentId: string, dto: SignDocumentDto) {
     const document = await this.prisma.document.findUnique({
       where: { id: documentId },
     });
@@ -2271,7 +2269,7 @@ export class DocumentsService {
 
     if (document.status !== 'FINALISED' && document.status !== 'SIGNED') {
       throw new ConflictException(
-        `Document must be in FINALISED or SIGNED status to lock. Current status: ${document.status}.`,
+        `Document must be in FINALISED or SIGNED status to record a signature. Current status: ${document.status}.`,
       );
     }
 
@@ -2310,11 +2308,17 @@ export class DocumentsService {
         CollaboratorPermission.MANAGE_ACCESS,
       ));
 
-    const signatureRequest = await this.ensureSignatureRequestForUser(
-      documentId,
-      document.ownerId,
-      userId,
-    );
+    const signatureRequest =
+      await this.prisma.documentSignatureRequest.findFirst({
+        where: { documentId, requestedUserId: userId },
+        select: SIGNATURE_REQUEST_SUMMARY_SELECT,
+      });
+
+    if (!signatureRequest) {
+      throw new ForbiddenException(
+        'You are not currently listed as a required signer for this document.',
+      );
+    }
 
     if (signatureRequest.status === SignatureRequestStatus.SIGNED) {
       throw new ConflictException('You have already signed this document.');
@@ -2339,31 +2343,26 @@ export class DocumentsService {
 
     const pendingSignatureCount =
       await this.countUnsignedSignatureRequests(documentId);
+    const updated = await this.syncDocumentSigningStatus(documentId);
 
     if (pendingSignatureCount > 0) {
       return {
-        ...this.formatDocument(document),
+        ...this.formatDocument(updated ?? document),
         signatureRequests: await this.getSignatureRequestSummaries(
           documentId,
           includeSignerProfiles,
         ),
-        signatureSnapshot: await this.buildSignatureSnapshot(document),
+        signatureSnapshot: await this.buildSignatureSnapshot(updated ?? document),
         signatureId: dto.signatureId,
         pendingSignatureCount,
         message:
-          'Signature recorded. The document will lock after all required signers complete signing.',
+          'Signature recorded. The owner can lock the document after all required signers complete signing.',
       };
     }
 
-    const updated = await this.lockDocumentIfAllRequiredSignaturesComplete(
-      documentId,
-      document.ownerId,
-      signedDoc.id,
-    );
-
     if (!updated) {
       throw new ConflictException(
-        'No completed signature is available to lock this document.',
+        'The document signing state could not be updated.',
       );
     }
 
@@ -2374,6 +2373,92 @@ export class DocumentsService {
       signatureRequests: await this.getSignatureRequestSummaries(
         documentId,
         includeSignerProfiles,
+      ),
+      pendingSignatureCount: 0,
+      message:
+        'All required signatures are complete. The owner can now lock this document.',
+    };
+  }
+
+  // ─── Lock ──────────────────────────────────────────────────────────────────
+
+  async lock(userId: string, documentId: string) {
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+    });
+
+    if (!document || document.isDeleted)
+      throw new NotFoundException('Document not found.');
+
+    if (document.ownerId !== userId) {
+      throw new ForbiddenException(
+        'Only the document owner can lock this document.',
+      );
+    }
+
+    if (document.status !== 'SIGNED') {
+      throw new ConflictException(
+        `Document must be in SIGNED status before locking. Current status: ${document.status}.`,
+      );
+    }
+
+    const pendingSignatureCount =
+      await this.countUnsignedSignatureRequests(documentId);
+
+    if (pendingSignatureCount > 0) {
+      throw new ConflictException(
+        'All required signatures must be completed before locking this document.',
+      );
+    }
+
+    const primarySignature = await this.resolvePrimarySignedDocument(
+      documentId,
+      document.ownerId,
+    );
+
+    if (!primarySignature) {
+      throw new ConflictException(
+        'At least one completed signature is required before locking this document.',
+      );
+    }
+
+    const signatureSnapshot = await this.buildSignerSnapshot(
+      primarySignature.userId,
+    );
+
+    await this.prisma.document.updateMany({
+      where: {
+        id: documentId,
+        status: DocumentStatus.SIGNED,
+      },
+      data: {
+        status: DocumentStatus.LOCKED,
+        personalSignedDocumentId: primarySignature.id,
+        signedAt: document.signedAt ?? primarySignature.signedAt,
+        lockedAt: new Date(),
+        signerDisplayName: signatureSnapshot.signerDisplayName,
+        signatureImageS3Key: signatureSnapshot.signatureImageS3Key,
+        signatureImageMimeType: signatureSnapshot.signatureImageMimeType,
+        signatureImageSizeBytes: signatureSnapshot.signatureImageSizeBytes,
+        signatureBlockX: DEFAULT_SIGNATURE_X,
+        signatureBlockY: DEFAULT_SIGNATURE_Y,
+      },
+    });
+
+    const updated = await this.prisma.document.findUnique({
+      where: { id: documentId },
+    });
+
+    if (!updated) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    return {
+      ...this.formatDocument(updated),
+      signatureSnapshot: await this.buildSignatureSnapshot(updated),
+      signatureRequests: await this.getSignatureRequestSummaries(
+        documentId,
+        true,
       ),
       pendingSignatureCount: 0,
       message: 'Document locked. It is now permanently immutable.',
@@ -2759,14 +2844,12 @@ export class DocumentsService {
         document.ownerId,
         input.userId,
       );
+      await this.syncDocumentSigningStatus(input.documentId);
       return;
     }
 
     await this.removeUnsignedSignatureRequest(input.documentId, input.userId);
-    await this.lockDocumentIfAllRequiredSignaturesComplete(
-      input.documentId,
-      document.ownerId,
-    );
+    await this.syncDocumentSigningStatus(input.documentId);
   }
 
   private collaboratorRequiresSignature(input: {
@@ -2928,42 +3011,36 @@ export class DocumentsService {
     return typeof requestId === 'string' ? requestId : null;
   }
 
-  private async lockDocumentIfAllRequiredSignaturesComplete(
-    documentId: string,
-    ownerId: string,
-    fallbackSignedDocumentId?: string,
-  ) {
-    if ((await this.countUnsignedSignatureRequests(documentId)) > 0) {
-      return null;
-    }
+  private async syncDocumentSigningStatus(documentId: string) {
+    const pendingSignatureCount =
+      await this.countUnsignedSignatureRequests(documentId);
+    const latestCompletedSignature =
+      pendingSignatureCount === 0
+        ? await this.prisma.documentSignatureRequest.findFirst({
+            where: {
+              documentId,
+              status: SignatureRequestStatus.SIGNED,
+              signedAt: { not: null },
+            },
+            orderBy: { signedAt: 'desc' },
+            select: { signedAt: true },
+          })
+        : null;
 
-    const primarySignature = await this.resolvePrimarySignedDocument(
-      documentId,
-      ownerId,
-      fallbackSignedDocumentId,
-    );
-    if (!primarySignature) return null;
-
-    const signatureSnapshot = await this.buildSignerSnapshot(
-      primarySignature.userId,
-    );
     await this.prisma.document.updateMany({
       where: {
         id: documentId,
         status: { in: [DocumentStatus.FINALISED, DocumentStatus.SIGNED] },
       },
-      data: {
-        status: DocumentStatus.LOCKED,
-        personalSignedDocumentId: primarySignature.id,
-        signedAt: primarySignature.signedAt,
-        lockedAt: new Date(),
-        signerDisplayName: signatureSnapshot.signerDisplayName,
-        signatureImageS3Key: signatureSnapshot.signatureImageS3Key,
-        signatureImageMimeType: signatureSnapshot.signatureImageMimeType,
-        signatureImageSizeBytes: signatureSnapshot.signatureImageSizeBytes,
-        signatureBlockX: DEFAULT_SIGNATURE_X,
-        signatureBlockY: DEFAULT_SIGNATURE_Y,
-      },
+      data: latestCompletedSignature?.signedAt
+        ? {
+            status: DocumentStatus.SIGNED,
+            signedAt: latestCompletedSignature.signedAt,
+          }
+        : {
+            status: DocumentStatus.FINALISED,
+            signedAt: null,
+          },
     });
 
     return this.prisma.document.findUnique({ where: { id: documentId } });

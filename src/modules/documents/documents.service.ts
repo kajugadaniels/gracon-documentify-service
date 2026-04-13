@@ -210,6 +210,11 @@ const SIGNATURE_REQUEST_SUMMARY_SELECT = {
   requestedUserId: true,
   status: true,
   personalSignedDocumentId: true,
+  signerDisplayNameSnapshot: true,
+  signerEmailSnapshot: true,
+  signatureImageS3KeySnapshot: true,
+  signatureImageMimeTypeSnapshot: true,
+  signatureImageSizeBytesSnapshot: true,
   signedAt: true,
   createdAt: true,
   updatedAt: true,
@@ -264,6 +269,11 @@ type SignedDocumentForLock = {
   userId: string;
   signedAt: Date;
   certificateId: string;
+  signerDisplayNameSnapshot: string | null;
+  signerEmailSnapshot: string | null;
+  signatureImageS3KeySnapshot: string | null;
+  signatureImageMimeTypeSnapshot: string | null;
+  signatureImageSizeBytesSnapshot: number | null;
 };
 
 type CompletedSignatureSummary = {
@@ -2358,6 +2368,7 @@ export class DocumentsService {
           status: SignatureRequestStatus.SIGNED,
           personalSignedDocumentId: signedDoc.id,
           signedAt: signedDoc.signedAt,
+          ...(await this.buildSignatureRequestSnapshotUpdate(userId)),
         },
       });
 
@@ -2454,9 +2465,21 @@ export class DocumentsService {
       );
     }
 
-    const signatureSnapshot = await this.buildSignerSnapshot(
-      primarySignature.userId,
-    );
+    const fallbackSnapshot = await this.buildSignerSnapshot(primarySignature.userId);
+    const signatureSnapshot = {
+      signerDisplayName:
+        primarySignature.signerDisplayNameSnapshot ??
+        fallbackSnapshot.signerDisplayName,
+      signatureImageS3Key:
+        primarySignature.signatureImageS3KeySnapshot ??
+        fallbackSnapshot.signatureImageS3Key,
+      signatureImageMimeType:
+        primarySignature.signatureImageMimeTypeSnapshot ??
+        fallbackSnapshot.signatureImageMimeType,
+      signatureImageSizeBytes:
+        primarySignature.signatureImageSizeBytesSnapshot ??
+        fallbackSnapshot.signatureImageSizeBytes,
+    };
 
     await this.prisma.document.updateMany({
       where: {
@@ -3094,7 +3117,7 @@ export class DocumentsService {
         status: SignatureRequestStatus.SIGNED,
         personalSignedDocumentId: { not: null },
       },
-      select: { personalSignedDocumentId: true },
+      select: SIGNATURE_REQUEST_SUMMARY_SELECT,
     });
     const firstRequest = ownerRequest
       ? null
@@ -3105,7 +3128,7 @@ export class DocumentsService {
             personalSignedDocumentId: { not: null },
           },
           orderBy: { signedAt: 'asc' },
-          select: { personalSignedDocumentId: true },
+          select: SIGNATURE_REQUEST_SUMMARY_SELECT,
         });
     const signatureId =
       ownerRequest?.personalSignedDocumentId ??
@@ -3118,6 +3141,24 @@ export class DocumentsService {
     return this.prisma.personalSignedDocument.findUnique({
       where: { id: signatureId },
       select: { id: true, userId: true, signedAt: true, certificateId: true },
+    }).then((signedDocument) => {
+      if (!signedDocument) {
+        return null;
+      }
+
+      const sourceRequest = ownerRequest ?? firstRequest ?? null;
+      return {
+        ...signedDocument,
+        signerDisplayNameSnapshot:
+          sourceRequest?.signerDisplayNameSnapshot ?? null,
+        signerEmailSnapshot: sourceRequest?.signerEmailSnapshot ?? null,
+        signatureImageS3KeySnapshot:
+          sourceRequest?.signatureImageS3KeySnapshot ?? null,
+        signatureImageMimeTypeSnapshot:
+          sourceRequest?.signatureImageMimeTypeSnapshot ?? null,
+        signatureImageSizeBytesSnapshot:
+          sourceRequest?.signatureImageSizeBytesSnapshot ?? null,
+      };
     });
   }
 
@@ -3130,6 +3171,7 @@ export class DocumentsService {
       this.prisma.user.findUnique({
         where: { id: userId },
         select: {
+          email: true,
           citizenIdentity: {
             select: { surName: true, postNames: true },
           },
@@ -3141,6 +3183,7 @@ export class DocumentsService {
       signerDisplayName:
         `${signer?.citizenIdentity?.postNames ?? ''} ${signer?.citizenIdentity?.surName ?? ''}`.trim() ||
         null,
+      signerEmail: signer?.email ?? null,
       signatureImageS3Key: activeSignatureImage?.s3Key ?? null,
       signatureImageMimeType: activeSignatureImage?.mimeType ?? null,
       signatureImageSizeBytes: activeSignatureImage?.sizeBytes ?? null,
@@ -3173,8 +3216,12 @@ export class DocumentsService {
     request: CompletedSignatureRecord,
     ownerId: string,
   ): Promise<CompletedSignatureSummary> {
+    const shouldFallbackToLiveProfile =
+      !request.signerDisplayNameSnapshot || !request.signerEmailSnapshot;
     const [signerSnapshot, signedDocument] = await Promise.all([
-      this.buildSignerSnapshot(request.requestedUserId),
+      shouldFallbackToLiveProfile
+        ? this.buildSignerSnapshot(request.requestedUserId)
+        : Promise.resolve(null),
       request.personalSignedDocumentId
         ? this.prisma.personalSignedDocument.findUnique({
             where: { id: request.personalSignedDocumentId },
@@ -3184,10 +3231,15 @@ export class DocumentsService {
     ]);
     let imageUrl: string | null = null;
 
-    if (signerSnapshot.signatureImageS3Key) {
+    const signatureImageS3Key =
+      request.signatureImageS3KeySnapshot ??
+      signerSnapshot?.signatureImageS3Key ??
+      null;
+
+    if (signatureImageS3Key) {
       try {
         imageUrl = await this.s3.getPresignedUrl(
-          signerSnapshot.signatureImageS3Key,
+          signatureImageS3Key,
           3600,
         );
       } catch (error) {
@@ -3202,18 +3254,40 @@ export class DocumentsService {
       certificateId: signedDocument?.certificateId ?? null,
       signerId: request.requestedUserId,
       signerName:
-        signerSnapshot.signerDisplayName ??
+        request.signerDisplayNameSnapshot ??
+        signerSnapshot?.signerDisplayName ??
         this.formatUserDisplayName(
           request.requestedUser.citizenIdentity?.postNames ?? null,
           request.requestedUser.citizenIdentity?.surName ?? null,
           request.requestedUser.email,
         ),
-      signerEmail: request.requestedUser.email,
+      signerEmail:
+        request.signerEmailSnapshot ??
+        signerSnapshot?.signerEmail ??
+        request.requestedUser.email,
       imageUrl,
-      mimeType: signerSnapshot.signatureImageMimeType,
-      sizeBytes: signerSnapshot.signatureImageSizeBytes,
+      mimeType:
+        request.signatureImageMimeTypeSnapshot ??
+        signerSnapshot?.signatureImageMimeType ??
+        null,
+      sizeBytes:
+        request.signatureImageSizeBytesSnapshot ??
+        signerSnapshot?.signatureImageSizeBytes ??
+        null,
       signedAt: request.signedAt ?? request.updatedAt,
       isOwner: request.requestedUserId === ownerId,
+    };
+  }
+
+  private async buildSignatureRequestSnapshotUpdate(userId: string) {
+    const snapshot = await this.buildSignerSnapshot(userId);
+
+    return {
+      signerDisplayNameSnapshot: snapshot.signerDisplayName,
+      signerEmailSnapshot: snapshot.signerEmail,
+      signatureImageS3KeySnapshot: snapshot.signatureImageS3Key,
+      signatureImageMimeTypeSnapshot: snapshot.signatureImageMimeType,
+      signatureImageSizeBytesSnapshot: snapshot.signatureImageSizeBytes,
     };
   }
 
@@ -3486,6 +3560,12 @@ export class DocumentsService {
       requestedUserId: request.requestedUserId,
       status: request.status,
       personalSignedDocumentId: request.personalSignedDocumentId,
+      signerDisplayNameSnapshot: request.signerDisplayNameSnapshot,
+      signerEmailSnapshot: request.signerEmailSnapshot,
+      signatureImageS3KeySnapshot: request.signatureImageS3KeySnapshot,
+      signatureImageMimeTypeSnapshot: request.signatureImageMimeTypeSnapshot,
+      signatureImageSizeBytesSnapshot:
+        request.signatureImageSizeBytesSnapshot,
       signedAt: request.signedAt,
       createdAt: request.createdAt,
       updatedAt: request.updatedAt,
@@ -4071,7 +4151,7 @@ export class DocumentsService {
     const storedY = typeof doc['signatureBlockY'] === 'number' ? doc['signatureBlockY'] : null;
     const fallback = alignmentToPosition(
       typeof doc['signatureBlockAlignment'] === 'string'
-        ? (doc['signatureBlockAlignment'] as string)
+        ? doc['signatureBlockAlignment']
         : null,
     );
     const x = storedX ?? fallback.x;

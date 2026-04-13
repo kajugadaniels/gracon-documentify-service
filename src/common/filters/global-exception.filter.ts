@@ -65,7 +65,10 @@ export class GlobalExceptionFilter implements ExceptionFilter {
           message: 'A database validation error occurred.',
         };
       default:
-        this.logger.error(`Prisma error ${e.code}`);
+        this.logger.error(
+          `Prisma error ${e.code}`,
+          e.meta ? JSON.stringify(e.meta) : undefined,
+        );
         return {
           statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
           message: 'A database error occurred.',

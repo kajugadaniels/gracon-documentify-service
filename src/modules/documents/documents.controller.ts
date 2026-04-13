@@ -33,7 +33,7 @@ import {
   UpdateSignatureLayoutDto,
 } from './dto/update-document.dto';
 import { FinaliseDocumentDto } from './dto/finalise-document.dto';
-import { LockDocumentDto } from './dto/lock-document.dto';
+import { SignDocumentDto } from './dto/sign-document.dto';
 import { QueryDocumentsDto } from './dto/query-documents.dto';
 import {
   ShareDocumentAccessDto,
@@ -440,7 +440,7 @@ export class DocumentsController {
   @ApiOperation({
     summary:
       'Freeze document content and compute SHA-256 hash. ' +
-      'After this, the user must sign the hash via api/signature/, then call /lock.',
+      'After this, required signers sign via /sign and the owner locks later via /lock.',
   })
   @ApiResponse({
     status: 200,
@@ -454,6 +454,29 @@ export class DocumentsController {
     return this.service.finalise(user.userId, documentId, dto);
   }
 
+  // ─── Sign ──────────────────────────────────────────────────────────────────
+
+  @Post(':documentId/sign')
+  @HttpCode(HttpStatus.OK)
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiOperation({
+    summary:
+      'Record the current user signature against a finalised document. ' +
+      'Provide the signatureId from api/signature/ and the documentHash that was signed. ' +
+      'The document moves to SIGNED once all required signers complete signing.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Signature recorded and signing progress updated',
+  })
+  sign(
+    @CurrentUser() user: RequestUser,
+    @Param('documentId') documentId: string,
+    @Body() dto: SignDocumentDto,
+  ) {
+    return this.service.sign(user.userId, documentId, dto);
+  }
+
   // ─── Lock ──────────────────────────────────────────────────────────────────
 
   @Post(':documentId/lock')
@@ -461,9 +484,7 @@ export class DocumentsController {
   @ApiParam({ name: 'documentId', type: String })
   @ApiOperation({
     summary:
-      'Lock the document after signing is complete. ' +
-      'Provide the signatureId from api/signature/ and the documentHash that was signed. ' +
-      'The service verifies both match before locking.',
+      'Lock a fully signed document. Only the owner can do this after all required signatures are complete.',
   })
   @ApiResponse({
     status: 200,
@@ -472,9 +493,8 @@ export class DocumentsController {
   lock(
     @CurrentUser() user: RequestUser,
     @Param('documentId') documentId: string,
-    @Body() dto: LockDocumentDto,
   ) {
-    return this.service.lock(user.userId, documentId, dto);
+    return this.service.lock(user.userId, documentId);
   }
 
   @Patch(':documentId/signature-layout')

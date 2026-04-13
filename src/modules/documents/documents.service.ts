@@ -186,6 +186,7 @@ type InvitationVerificationSessionRecord = {
   emailOtpRequestCount: number;
   emailOtpWindowStartedAt: Date | null;
   identityChallengeStartedAt: Date | null;
+  identityFailureAttemptId: string | null;
   identityVerificationAttemptId: string | null;
   identityVerifiedAt: Date | null;
   completedAt: Date | null;
@@ -4057,17 +4058,18 @@ export class DocumentsService {
     const session = existing
       ? await this.prisma.documentInvitationVerificationSession.update({
           where: { collaboratorId: invitation.id },
-          data: {
-            userId: invitation.userId,
-            documentId: invitation.documentId,
-            emailOtpCodeHash: null,
-            emailOtpSentAt: null,
-            emailOtpExpiresAt: null,
+        data: {
+          userId: invitation.userId,
+          documentId: invitation.documentId,
+          emailOtpCodeHash: null,
+          emailOtpSentAt: null,
+          emailOtpExpiresAt: null,
           emailOtpVerifiedAt: null,
           emailOtpAttemptCount: 0,
           emailOtpRequestCount: 0,
           emailOtpWindowStartedAt: null,
           identityChallengeStartedAt: null,
+          identityFailureAttemptId: null,
           identityVerificationAttemptId: null,
           identityVerifiedAt: null,
           completedAt: null,
@@ -4187,6 +4189,7 @@ export class DocumentsService {
         where: { collaboratorId: invitation.id },
         data: {
           identityChallengeStartedAt: challengeStartedAt,
+          identityFailureAttemptId: null,
           identityVerificationAttemptId: null,
           identityVerifiedAt: null,
           completedAt: null,
@@ -4226,6 +4229,51 @@ export class DocumentsService {
       return session;
     }
 
+    let nextSession = session;
+
+    const failedAttempt = await this.prisma.idVerification.findFirst({
+      where: {
+        userId: invitation.userId,
+        passed: false,
+        createdAt: { gte: session.identityChallengeStartedAt },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, createdAt: true, failReason: true },
+    });
+
+    if (
+      failedAttempt &&
+      failedAttempt.id !== session.identityFailureAttemptId
+    ) {
+      nextSession =
+        await this.prisma.documentInvitationVerificationSession.update({
+          where: { collaboratorId: invitation.id },
+          data: {
+            identityFailureAttemptId: failedAttempt.id,
+          },
+        });
+
+      await this.recordAccessAudit({
+        documentId: invitation.documentId,
+        collaboratorId: invitation.id,
+        actorUserId,
+        targetUserId: invitation.userId,
+        eventType: DocumentAccessAuditEvent.IDENTITY_VERIFICATION_FAILED,
+        fromPermissions: invitation.permissions,
+        toPermissions: invitation.permissions,
+        invitationStatus: invitation.invitationStatus,
+        metadata: {
+          identityChallengeStartedAt:
+            session.identityChallengeStartedAt.toISOString(),
+          identityVerificationAttemptId: failedAttempt.id,
+          identityVerificationFailedAt: failedAttempt.createdAt.toISOString(),
+          failReason:
+            failedAttempt.failReason?.trim() || 'Identity verification failed.',
+        },
+        ...context,
+      });
+    }
+
     const passedAttempt = await this.prisma.idVerification.findFirst({
       where: {
         userId: invitation.userId,
@@ -4237,7 +4285,7 @@ export class DocumentsService {
     });
 
     if (!passedAttempt) {
-      return session;
+      return nextSession;
     }
 
     const updated = await this.prisma.documentInvitationVerificationSession.update(
@@ -4251,7 +4299,7 @@ export class DocumentsService {
       },
     );
 
-    if (!session.identityVerificationAttemptId) {
+    if (!nextSession.identityVerificationAttemptId) {
       await this.recordAccessAudit({
         documentId: invitation.documentId,
         collaboratorId: invitation.id,
@@ -4381,7 +4429,9 @@ export class DocumentsService {
       'emailOtpSentAt',
       'emailOtpVerifiedAt',
       'expiresAt',
+      'failReason',
       'identityChallengeStartedAt',
+      'identityVerificationFailedAt',
       'identityVerificationAttemptId',
       'identityVerifiedAt',
       'lockedAt',

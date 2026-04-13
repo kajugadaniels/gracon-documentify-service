@@ -4,6 +4,8 @@ import {
   ForbiddenException,
   BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
   Logger,
 } from '@nestjs/common';
 import * as crypto from 'crypto';
@@ -69,6 +71,7 @@ const EMPTY_SPREADSHEET_CONTENT = {
 const DEFAULT_SIGNATURE_X = 0.57;
 const DEFAULT_SIGNATURE_Y = 0.78;
 const DEFAULT_INVITATION_EXPIRY_DAYS = 7;
+const SIGNATURE_REMINDER_COOLDOWN_MS = 15 * 60 * 1000;
 const CANONICAL_PERMISSION_ORDER: CollaboratorPermission[] = [
   CollaboratorPermission.READ,
   CollaboratorPermission.COMMENT,
@@ -1747,6 +1750,11 @@ export class DocumentsService {
       document.ownerId,
       request.requestedUserId,
     );
+    await this.assertSignatureReminderCooldown(
+      documentId,
+      request.id,
+      request.requestedUserId,
+    );
 
     const actor = await this.prisma.user.findUnique({
       where: { id: actorUserId },
@@ -1781,12 +1789,11 @@ export class DocumentsService {
         collaboratorId: null,
         actorUserId,
         targetUserId: request.requestedUserId,
-        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_SENT,
+        eventType: DocumentAccessAuditEvent.SIGNATURE_REMINDER_SENT,
         fromPermissions: [],
         toPermissions: [CollaboratorPermission.SIGN],
         invitationStatus: null,
         metadata: {
-          signatureReminder: true,
           requestId: request.id,
           sentAt: sentAt.toISOString(),
         },
@@ -1800,12 +1807,11 @@ export class DocumentsService {
         collaboratorId: null,
         actorUserId,
         targetUserId: request.requestedUserId,
-        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_FAILED,
+        eventType: DocumentAccessAuditEvent.SIGNATURE_REMINDER_FAILED,
         fromPermissions: [],
         toPermissions: [CollaboratorPermission.SIGN],
         invitationStatus: null,
         metadata: {
-          signatureReminder: true,
           requestId: request.id,
           message:
             error instanceof Error
@@ -2799,6 +2805,61 @@ export class DocumentsService {
         'This signer no longer has active signing access to the document.',
       );
     }
+  }
+
+  private async assertSignatureReminderCooldown(
+    documentId: string,
+    requestId: string,
+    targetUserId: string,
+  ): Promise<void> {
+    const createdAfter = new Date(Date.now() - SIGNATURE_REMINDER_COOLDOWN_MS);
+    const recentReminderEvents =
+      await this.prisma.documentAccessAuditLog.findMany({
+        where: {
+          documentId,
+          targetUserId,
+          createdAt: { gte: createdAfter },
+          eventType: {
+            in: [
+              DocumentAccessAuditEvent.SIGNATURE_REMINDER_SENT,
+              DocumentAccessAuditEvent.SIGNATURE_REMINDER_FAILED,
+            ],
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+        select: {
+          createdAt: true,
+          metadata: true,
+        },
+      });
+    const recentForRequest = recentReminderEvents.find((event) =>
+      this.isSignatureReminderMetadataForRequest(event.metadata, requestId),
+    );
+
+    if (!recentForRequest) {
+      return;
+    }
+
+    const retryAt = new Date(
+      recentForRequest.createdAt.getTime() + SIGNATURE_REMINDER_COOLDOWN_MS,
+    );
+
+    throw new HttpException(
+      `A reminder was already sent recently. Try again after ${retryAt.toISOString()}.`,
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+
+  private isSignatureReminderMetadataForRequest(
+    metadata: Prisma.JsonValue | null,
+    requestId: string,
+  ): boolean {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      return false;
+    }
+
+    return (metadata as Record<string, unknown>)['requestId'] === requestId;
   }
 
   private async lockDocumentIfAllRequiredSignaturesComplete(

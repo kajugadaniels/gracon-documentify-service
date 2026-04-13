@@ -979,6 +979,11 @@ model DocumentSignatureRequest {
   declinedReason  String?
   // Set when the user actually signs
   personalSignedDocumentId String?             @unique
+  signerDisplayNameSnapshot      String?
+  signerEmailSnapshot            String?
+  signatureImageS3KeySnapshot    String?
+  signatureImageMimeTypeSnapshot String?
+  signatureImageSizeBytesSnapshot Int?
   signedAt        DateTime?
   createdAt       DateTime                     @default(now())
   updatedAt       DateTime                     @updatedAt

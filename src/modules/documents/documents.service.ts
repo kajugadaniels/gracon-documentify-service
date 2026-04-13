@@ -2511,6 +2511,7 @@ export class DocumentsService {
         title: accepted.document.title,
       },
       permissions: accepted.permissions,
+      acceptedAt: acceptedAt.toISOString(),
     };
   }
 

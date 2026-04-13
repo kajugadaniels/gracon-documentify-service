@@ -2379,6 +2379,31 @@ export class DocumentsService {
     const pendingSignatureCount =
       await this.countUnsignedSignatureRequests(documentId);
     const updated = await this.syncDocumentSigningStatus(documentId);
+    const completedSignatures = await this.getCompletedSignatureSummaries(
+      documentId,
+      document.ownerId,
+    );
+    const signingOrder = completedSignatures.findIndex(
+      (signature) => signature.signerId === userId,
+    );
+
+    await this.recordAccessAudit({
+      documentId,
+      collaboratorId: null,
+      actorUserId: userId,
+      targetUserId: userId,
+      eventType: DocumentAccessAuditEvent.DOCUMENT_SIGNED,
+      fromPermissions: [],
+      toPermissions: [],
+      invitationStatus: null,
+      metadata: {
+        signatureId: dto.signatureId,
+        signingOrder: signingOrder >= 0 ? signingOrder + 1 : null,
+        totalSigned: completedSignatures.length,
+        totalRequired: completedSignatures.length + pendingSignatureCount,
+        pendingSignatureCount,
+      },
+    });
 
     if (pendingSignatureCount > 0) {
       return {
@@ -2388,10 +2413,7 @@ export class DocumentsService {
           includeSignerProfiles,
         ),
         signatureSnapshot: await this.buildSignatureSnapshot(updated ?? document),
-        completedSignatures: await this.getCompletedSignatureSummaries(
-          documentId,
-          document.ownerId,
-        ),
+        completedSignatures,
         signatureId: dto.signatureId,
         pendingSignatureCount,
         message:
@@ -2413,10 +2435,7 @@ export class DocumentsService {
         documentId,
         includeSignerProfiles,
       ),
-      completedSignatures: await this.getCompletedSignatureSummaries(
-        documentId,
-        document.ownerId,
-      ),
+      completedSignatures,
       pendingSignatureCount: 0,
       message:
         'All required signatures are complete. The owner can now lock this document.',
@@ -2508,6 +2527,26 @@ export class DocumentsService {
       throw new NotFoundException('Document not found.');
     }
 
+    const completedSignatures = await this.getCompletedSignatureSummaries(
+      documentId,
+      document.ownerId,
+    );
+
+    await this.recordAccessAudit({
+      documentId,
+      collaboratorId: null,
+      actorUserId: userId,
+      targetUserId: null,
+      eventType: DocumentAccessAuditEvent.DOCUMENT_LOCKED,
+      fromPermissions: [],
+      toPermissions: [],
+      invitationStatus: null,
+      metadata: {
+        completedSignatureCount: completedSignatures.length,
+        lockedAt: updated.lockedAt?.toISOString() ?? null,
+      },
+    });
+
     return {
       ...this.formatDocument(updated),
       signatureSnapshot: await this.buildSignatureSnapshot(updated),
@@ -2515,10 +2554,7 @@ export class DocumentsService {
         documentId,
         true,
       ),
-      completedSignatures: await this.getCompletedSignatureSummaries(
-        documentId,
-        document.ownerId,
-      ),
+      completedSignatures,
       pendingSignatureCount: 0,
       message: 'Document locked. It is now permanently immutable.',
     };
@@ -2649,6 +2685,7 @@ export class DocumentsService {
       where: { id: documentId },
       select: {
         id: true,
+        ownerId: true,
         title: true,
         status: true,
         contentHash: true,
@@ -2697,6 +2734,16 @@ export class DocumentsService {
       },
       signedAt: document.signedAt,
       lockedAt: document.lockedAt,
+      signers: (await this.getCompletedSignatureSummaries(
+        documentId,
+        document.ownerId,
+      )).map((signature, index) => ({
+        name: signature.signerName,
+        email: signature.signerEmail,
+        signedAt: signature.signedAt,
+        isOwner: signature.isOwner,
+        signingOrder: index + 1,
+      })),
       signature: signedDoc
         ? {
             documentHash: signedDoc.documentHash,

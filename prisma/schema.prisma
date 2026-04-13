@@ -852,6 +852,8 @@ model DocumentInvitationVerificationSession {
   emailOtpAttemptCount   Int      @default(0)
   emailOtpRequestCount   Int      @default(0)
   emailOtpWindowStartedAt DateTime?
+  identityChallengeStartedAt DateTime?
+  identityVerificationAttemptId String?
   identityVerifiedAt     DateTime?
   completedAt            DateTime?
   expiresAt              DateTime

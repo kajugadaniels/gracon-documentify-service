@@ -3550,15 +3550,21 @@ export class DocumentsService {
       'acceptedAt',
       'anchored',
       'commentId',
+      'completedSignatureCount',
       'declinedAt',
       'expiresAt',
+      'lockedAt',
       'notePresent',
       'openedAt',
+      'pendingSignatureCount',
       'parentCommentId',
       'previousStatus',
       'resent',
       'resolvedAt',
       'sentAt',
+      'signingOrder',
+      'totalRequired',
+      'totalSigned',
     ];
     const sanitized: Record<string, unknown> = {};
 

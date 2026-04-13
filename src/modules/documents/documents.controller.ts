@@ -330,6 +330,7 @@ export class DocumentsController {
 
   @Post(':documentId/signature-requests/:requestId/remind')
   @HttpCode(HttpStatus.OK)
+  @Throttle({ strict: { limit: 5, ttl: 600_000 } })
   @ApiParam({ name: 'documentId', type: String })
   @ApiParam({ name: 'requestId', type: String })
   @ApiOperation({

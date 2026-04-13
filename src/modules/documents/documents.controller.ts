@@ -40,6 +40,10 @@ import {
   UpdateDocumentAccessDto,
 } from './dto/manage-access.dto';
 import { CreateDocumentCommentDto } from './dto/document-comment.dto';
+import {
+  RequestInvitationEmailOtpDto,
+  VerifyInvitationEmailOtpDto,
+} from './dto/invitation-email-otp.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import type { RequestUser } from '../auth/interfaces/jwt-payload.interface';
@@ -130,6 +134,75 @@ export class DocumentsController {
       ipAddress: req.ip,
       userAgent: req.get('user-agent') ?? null,
     });
+  }
+
+  @Get('invitations/:token/gate')
+  @Public()
+  @Throttle({ strict: { limit: 40, ttl: 600_000 } })
+  @ApiParam({ name: 'token', type: String })
+  @ApiOperation({
+    summary:
+      'Resolve the next invitation step after login, email OTP, and identity verification.',
+  })
+  getInvitationGateStatus(@Param('token') token: string, @Req() req: Request) {
+    return this.service.getInvitationGateStatus(
+      token,
+      req.get('authorization'),
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') ?? null,
+      },
+    );
+  }
+
+  @Post('invitations/:token/email-otp/request')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ strict: { limit: 10, ttl: 600_000 } })
+  @ApiParam({ name: 'token', type: String })
+  @ApiOperation({
+    summary:
+      'Send the invitation-scoped email OTP after the invited user types their email.',
+  })
+  requestInvitationEmailOtp(
+    @Param('token') token: string,
+    @Body() dto: RequestInvitationEmailOtpDto,
+    @Req() req: Request,
+  ) {
+    return this.service.requestInvitationEmailOtp(
+      token,
+      req.get('authorization'),
+      dto,
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') ?? null,
+      },
+    );
+  }
+
+  @Post('invitations/:token/email-otp/verify')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ strict: { limit: 30, ttl: 600_000 } })
+  @ApiParam({ name: 'token', type: String })
+  @ApiOperation({
+    summary:
+      'Verify the invitation-scoped email OTP before allowing identity verification or review.',
+  })
+  verifyInvitationEmailOtp(
+    @Param('token') token: string,
+    @Body() dto: VerifyInvitationEmailOtpDto,
+    @Req() req: Request,
+  ) {
+    return this.service.verifyInvitationEmailOtp(
+      token,
+      req.get('authorization'),
+      dto,
+      {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') ?? null,
+      },
+    );
   }
 
   @Post('invitations/:token/accept')

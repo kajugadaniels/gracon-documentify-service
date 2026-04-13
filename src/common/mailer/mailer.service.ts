@@ -28,6 +28,13 @@ type SendDocumentSignatureReminderEmailParams = {
   signUrl: string;
 };
 
+type SendInvitationEmailOtpParams = {
+  to: string;
+  recipientName: string;
+  code: string;
+  expiresInMinutes: number;
+};
+
 @Injectable()
 export class AppMailerService {
   private readonly logger = new Logger(AppMailerService.name);
@@ -116,6 +123,40 @@ export class AppMailerService {
       this.logger.log('Document signature reminder email sent');
     } catch (error) {
       this.logger.error('Failed to send document signature reminder', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Sends the invitation step-up email OTP required before invitation review.
+   *
+   * Security: the email contains only the one-time numeric code and never
+   * exposes document content, invitation tokens, or acceptance links.
+   */
+  async sendInvitationEmailOtp(
+    params: SendInvitationEmailOtpParams,
+  ): Promise<void> {
+    const { to, recipientName, code, expiresInMinutes } = params;
+
+    try {
+      await this.mailerService.sendMail({
+        to,
+        subject: 'Your document invitation verification code',
+        template: 'document-invitation-email-otp',
+        context: {
+          recipientName,
+          code,
+          expiresInMinutes,
+          currentYear: new Date().getFullYear(),
+          supportEmail:
+            this.configService.get<string>('MAIL_USER') ??
+            'support@example.com',
+        },
+      });
+
+      this.logger.log(`Invitation email OTP sent to ${to}`);
+    } catch (error) {
+      this.logger.error(`Failed to send invitation email OTP to ${to}`, error);
       throw error;
     }
   }

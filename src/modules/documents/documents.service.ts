@@ -2208,10 +2208,17 @@ export class DocumentsService {
     const content = await this.s3.getJson(document.s3ContentKey);
     const contentHash = hashDocumentContent(content);
 
-    const signerIds = await this.getRequiredSignerIdsForDocument(
-      documentId,
-      document.ownerId,
-    );
+    const collaboratorSignerIds =
+      await this.getRequiredSignerIdsForDocument(documentId);
+    const signerIds = dto.requireOwnerSignature
+      ? Array.from(new Set([document.ownerId, ...collaboratorSignerIds]))
+      : collaboratorSignerIds;
+
+    if (signerIds.length === 0) {
+      throw new ConflictException(
+        'Add at least one accepted signer or require your own signature before finalising.',
+      );
+    }
 
     const updated = await this.prisma.$transaction(async (tx) => {
       const saved = await tx.document.update({
@@ -2247,7 +2254,7 @@ export class DocumentsService {
       pendingSignatureCount:
         this.countUnsignedSignatureRequestSummaries(signatureRequests),
       message:
-        'Document finalised. The content is now frozen. Proceed to sign at api/signature/.',
+        'Document finalised. The content is now frozen and explicit required signers can now sign.',
     };
   }
 
@@ -2629,7 +2636,6 @@ export class DocumentsService {
 
   private async getRequiredSignerIdsForDocument(
     documentId: string,
-    ownerId: string,
   ): Promise<string[]> {
     const collaborators = await this.prisma.documentCollaborator.findMany({
       where: {
@@ -2642,9 +2648,7 @@ export class DocumentsService {
       select: { userId: true },
     });
 
-    return Array.from(
-      new Set([ownerId, ...collaborators.map((entry) => entry.userId)]),
-    );
+    return Array.from(new Set(collaborators.map((entry) => entry.userId)));
   }
 
   private async ensureSignatureRequestForUser(

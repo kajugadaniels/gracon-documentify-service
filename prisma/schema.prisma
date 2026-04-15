@@ -731,6 +731,7 @@ model Document {
   s3PdfKey        String?                              // S3 key for rendered PDF (set after signing)
   contentHash     String?                              // SHA-256 of content JSON at finalisation
   wordCount       Int             @default(0)          // updated on each autosave
+  layout          Json?                                // persisted page layout settings (paper + margins)
   signerDisplayName      String?                      // immutable signer name snapshot taken at lock time
   signatureImageS3Key    String?                      // immutable signature image snapshot key taken at lock time
   signatureImageMimeType String?                      // snapshot mime type for display fidelity

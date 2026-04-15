@@ -496,7 +496,7 @@ export class DocumentsController {
   @Patch(':documentId')
   @HttpCode(HttpStatus.OK)
   @ApiParam({ name: 'documentId', type: String })
-  @ApiOperation({ summary: 'Update document title or tags. DRAFT only.' })
+  @ApiOperation({ summary: 'Update document title, tags, or page layout. DRAFT only.' })
   updateMetadata(
     @CurrentUser() user: RequestUser,
     @Param('documentId') documentId: string,

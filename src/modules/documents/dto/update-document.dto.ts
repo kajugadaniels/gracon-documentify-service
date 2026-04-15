@@ -7,8 +7,57 @@ import {
   IsNumber,
   Min,
   Max,
+  ValidateNested,
+  IsIn,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
+
+export class DocumentLayoutMarginsDto {
+  @ApiPropertyOptional({ minimum: 48, maximum: 192 })
+  @IsOptional()
+  @IsNumber()
+  @Min(48)
+  @Max(192)
+  top?: number;
+
+  @ApiPropertyOptional({ minimum: 48, maximum: 192 })
+  @IsOptional()
+  @IsNumber()
+  @Min(48)
+  @Max(192)
+  right?: number;
+
+  @ApiPropertyOptional({ minimum: 48, maximum: 192 })
+  @IsOptional()
+  @IsNumber()
+  @Min(48)
+  @Max(192)
+  bottom?: number;
+
+  @ApiPropertyOptional({ minimum: 48, maximum: 192 })
+  @IsOptional()
+  @IsNumber()
+  @Min(48)
+  @Max(192)
+  left?: number;
+}
+
+export class DocumentLayoutDto {
+  @ApiPropertyOptional({ enum: ['A4'], description: 'Persisted paper size.' })
+  @IsOptional()
+  @IsIn(['A4'])
+  paperSize?: 'A4';
+
+  @ApiPropertyOptional({
+    type: () => DocumentLayoutMarginsDto,
+    description: 'Persisted page margins in CSS pixels.',
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => DocumentLayoutMarginsDto)
+  margins?: DocumentLayoutMarginsDto;
+}
 
 export class UpdateDocumentDto {
   @ApiPropertyOptional({ description: 'New document title.' })
@@ -22,6 +71,15 @@ export class UpdateDocumentDto {
   @IsArray()
   @IsString({ each: true })
   tags?: string[];
+
+  @ApiPropertyOptional({
+    type: () => DocumentLayoutDto,
+    description: 'Persisted page layout settings.',
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => DocumentLayoutDto)
+  layout?: DocumentLayoutDto;
 }
 
 export class AutosaveDocumentDto {

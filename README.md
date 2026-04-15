@@ -17,6 +17,7 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Folder CRUD and listing
 - Template listing and application
 - Document creation, autosave, rename, copy, and version restore
+- Persisted page layout metadata for paper size and margins
 - Finalise/sign/lock workflow
 - Sharing and collaborator permission model
 - Invitation issuance, review, and acceptance
@@ -40,6 +41,7 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Separation of finalise, sign, and lock actions
 - Audit events for access, reminders, invitation proof chain, and signing flow
 - Lightweight metadata refresh for collaborative UI clients
+- Normalized page layout persistence so editor and export geometry stay aligned
 - Shared JWT validation against the auth service secret without reissuing tokens
 
 ## Main Modules
@@ -123,6 +125,7 @@ APP_URL=http://localhost:4002
 - Keep invitation proof chain auditable
 - Do not collapse finalise, sign, and lock into one action
 - Treat S3 content as the canonical document body, not the database row
+- Keep document `layout` metadata compatible with editor and export consumers
 - Never run shared-schema migrations here
 
 ## Contribution Checklist
@@ -131,4 +134,3 @@ APP_URL=http://localhost:4002
 - Record audit entries for state-changing collaboration actions
 - Preserve current signing semantics: explicit signers, explicit owner lock
 - Build and verify the public verification payload after data-model changes
-

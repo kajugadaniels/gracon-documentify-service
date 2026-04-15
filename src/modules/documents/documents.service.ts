@@ -77,6 +77,15 @@ const EMPTY_SPREADSHEET_CONTENT = {
 // Default position — bottom-right area of the A4 page (normalized 0–1)
 const DEFAULT_SIGNATURE_X = 0.57;
 const DEFAULT_SIGNATURE_Y = 0.78;
+const DEFAULT_DOCUMENT_LAYOUT = {
+  paperSize: 'A4',
+  margins: {
+    top: 96,
+    right: 96,
+    bottom: 96,
+    left: 96,
+  },
+} as const;
 const DEFAULT_INVITATION_EXPIRY_DAYS = 7;
 const SIGNATURE_REMINDER_COOLDOWN_MS = 15 * 60 * 1000;
 const INVITATION_EMAIL_OTP_LENGTH = 6;
@@ -324,6 +333,18 @@ type CompletedSignatureSummary = {
   isOwner: boolean;
 };
 
+type DocumentLayoutMargins = {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+};
+
+type DocumentLayout = {
+  paperSize: 'A4';
+  margins: DocumentLayoutMargins;
+};
+
 // Backward-compat: derive x/y from old alignment enum for documents
 // that were locked before free placement was introduced.
 function alignmentToPosition(
@@ -412,6 +433,7 @@ export class DocumentsService {
         status: 'DRAFT',
         folderId: dto.folderId,
         tags: dto.tags ?? [],
+        layout: DEFAULT_DOCUMENT_LAYOUT as Prisma.InputJsonValue,
       },
     });
 
@@ -461,6 +483,7 @@ export class DocumentsService {
         folderId,
         tags: source.tags,
         wordCount: source.wordCount,
+        layout: this.normalizeDocumentLayout(source.layout) as Prisma.InputJsonValue,
       },
     });
 
@@ -2624,12 +2647,14 @@ export class DocumentsService {
     dto: UpdateDocumentDto,
   ) {
     const document = await this.getEditableDocument(userId, documentId);
+    const layout = this.mergeDocumentLayout(document.layout, dto.layout);
 
     const updated = await this.prisma.document.update({
       where: { id: document.id },
       data: {
         ...(dto.title !== undefined ? { title: dto.title } : {}),
         ...(dto.tags !== undefined ? { tags: dto.tags } : {}),
+        ...(dto.layout !== undefined ? { layout: layout as Prisma.InputJsonValue } : {}),
       },
     });
 
@@ -5041,6 +5066,61 @@ export class DocumentsService {
     return `${copyStem} (${nextNumber})`;
   }
 
+  private normalizeMarginValue(value: unknown, fallback: number) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return fallback;
+    }
+
+    return Math.min(192, Math.max(48, Math.round(value)));
+  }
+
+  private normalizeDocumentLayout(raw: unknown): DocumentLayout {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return {
+        paperSize: DEFAULT_DOCUMENT_LAYOUT.paperSize,
+        margins: { ...DEFAULT_DOCUMENT_LAYOUT.margins },
+      };
+    }
+
+    const source = raw as Record<string, unknown>;
+    const rawMargins =
+      source['margins'] && typeof source['margins'] === 'object' && !Array.isArray(source['margins'])
+        ? (source['margins'] as Record<string, unknown>)
+        : {};
+
+    return {
+      paperSize: 'A4',
+      margins: {
+        top: this.normalizeMarginValue(rawMargins['top'], DEFAULT_DOCUMENT_LAYOUT.margins.top),
+        right: this.normalizeMarginValue(rawMargins['right'], DEFAULT_DOCUMENT_LAYOUT.margins.right),
+        bottom: this.normalizeMarginValue(rawMargins['bottom'], DEFAULT_DOCUMENT_LAYOUT.margins.bottom),
+        left: this.normalizeMarginValue(rawMargins['left'], DEFAULT_DOCUMENT_LAYOUT.margins.left),
+      },
+    };
+  }
+
+  private mergeDocumentLayout(
+    currentLayout: unknown,
+    nextLayout?: {
+      paperSize?: 'A4';
+      margins?: Partial<DocumentLayoutMargins>;
+    },
+  ): DocumentLayout {
+    const current = this.normalizeDocumentLayout(currentLayout);
+
+    if (!nextLayout) {
+      return current;
+    }
+
+    return this.normalizeDocumentLayout({
+      paperSize: nextLayout.paperSize ?? current.paperSize,
+      margins: {
+        ...current.margins,
+        ...(nextLayout.margins ?? {}),
+      },
+    });
+  }
+
   private formatDocument(doc: Record<string, unknown>) {
     return {
       id: doc['id'],
@@ -5056,6 +5136,7 @@ export class DocumentsService {
       finalisedAt: doc['finalisedAt'],
       signedAt: doc['signedAt'],
       lockedAt: doc['lockedAt'],
+      layout: this.normalizeDocumentLayout(doc['layout']),
       signatureSnapshot: null,
     };
   }

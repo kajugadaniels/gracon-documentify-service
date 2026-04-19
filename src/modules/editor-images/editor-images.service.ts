@@ -1,140 +1,98 @@
 import {
   BadRequestException,
   Injectable,
-  InternalServerErrorException,
-  Logger,
   PayloadTooLargeException,
-  ServiceUnavailableException,
   UnsupportedMediaTypeException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'node:crypto';
+import { S3Service } from '../../common/s3/s3.service';
 
 const DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-const ALLOWED_IMAGE_TYPES = new Set([
-  'image/avif',
-  'image/gif',
-  'image/jpeg',
-  'image/png',
-  'image/webp',
+const EDITOR_IMAGE_PREFIX = 'document-editor-images';
+const TOKEN_VERSION = 'v1';
+const ALLOWED_IMAGE_TYPES = new Map<string, string>([
+  ['image/avif', 'avif'],
+  ['image/gif', 'gif'],
+  ['image/jpeg', 'jpg'],
+  ['image/png', 'png'],
+  ['image/webp', 'webp'],
 ]);
-
-interface CloudinaryUploadResponse {
-  secure_url?: string;
-  public_id?: string;
-  bytes?: number;
-  width?: number;
-  height?: number;
-  format?: string;
-  resource_type?: string;
-  error?: { message?: string };
-}
 
 export interface UploadedEditorImage {
   url: string;
-  publicId?: string;
-  bytes?: number;
-  width?: number;
-  height?: number;
-  format?: string;
-  resourceType?: string;
+  key: string;
+  bytes: number;
+  mimeType: string;
+}
+
+export interface EditorImageObject {
+  buffer: Buffer;
+  contentType: string;
+  key: string;
 }
 
 @Injectable()
 export class EditorImagesService {
-  private readonly logger = new Logger(EditorImagesService.name);
   private readonly maxImageBytes: number;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly s3: S3Service,
+  ) {
     this.maxImageBytes =
       this.config.get<number>('EDITOR_IMAGE_MAX_SIZE_BYTES') ??
       DEFAULT_MAX_IMAGE_BYTES;
   }
 
   /**
-   * Uploads a validated editor image to Cloudinary and returns the hosted URL.
+   * Uploads a validated editor image to private S3 storage and returns a stable
+   * signed render URL that can be stored safely in document content.
    *
+   * @param userId - Authenticated uploader ID.
    * @param file - Multer in-memory image file.
-   * @returns Cloudinary-hosted image metadata.
+   * @param apiBaseUrl - Public base URL for this documents API.
+   * @returns Stable render URL and upload metadata.
    */
-  async upload(file?: Express.Multer.File): Promise<UploadedEditorImage> {
+  async upload(
+    userId: string,
+    file: Express.Multer.File | undefined,
+    apiBaseUrl: string,
+  ): Promise<UploadedEditorImage> {
     if (!file) {
       throw new BadRequestException('Upload an image file.');
     }
 
-    this.validateFile(file);
+    const extension = this.validateFile(file);
+    const key = this.buildObjectKey(userId, extension);
 
-    const cloudName = this.config.get<string>('CLOUDINARY_CLOUD_NAME');
-    const apiKey = this.config.get<string>('CLOUDINARY_API_KEY');
-    const apiSecret = this.config.get<string>('CLOUDINARY_API_SECRET');
-    const folder =
-      this.config.get<string>('CLOUDINARY_EDITOR_IMAGES_FOLDER') ??
-      'gracon/documents/editor-images';
-
-    if (!cloudName || !apiKey || !apiSecret) {
-      throw new ServiceUnavailableException('Image upload is not configured.');
-    }
-
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const uploadParams = {
-      folder,
-      overwrite: 'false',
-      timestamp,
-      unique_filename: 'true',
-    };
-    const signature = this.signCloudinaryParams(uploadParams, apiSecret);
-    const form = new FormData();
-
-    form.set(
-      'file',
-      `data:${file.mimetype};base64,${file.buffer.toString('base64')}`,
-    );
-    form.set('api_key', apiKey);
-    form.set('folder', uploadParams.folder);
-    form.set('overwrite', uploadParams.overwrite);
-    form.set('timestamp', uploadParams.timestamp);
-    form.set('unique_filename', uploadParams.unique_filename);
-    form.set('signature', signature);
-
-    let response: Response;
-    let payload: CloudinaryUploadResponse;
-
-    try {
-      response = await fetch(
-        `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
-        {
-          method: 'POST',
-          body: form,
-        },
-      );
-      payload = (await response.json()) as CloudinaryUploadResponse;
-    } catch (error) {
-      this.logger.error('Cloudinary editor image upload failed.', error);
-      throw new ServiceUnavailableException(
-        'Image upload service is unavailable.',
-      );
-    }
-
-    if (!response.ok || !payload.secure_url) {
-      this.logger.warn(
-        `Cloudinary editor image upload rejected: ${payload.error?.message ?? response.statusText}`,
-      );
-      throw new InternalServerErrorException('Failed to upload image.');
-    }
+    await this.s3.putBuffer(key, file.buffer, file.mimetype);
 
     return {
-      url: payload.secure_url,
-      publicId: payload.public_id,
-      bytes: payload.bytes,
-      width: payload.width,
-      height: payload.height,
-      format: payload.format,
-      resourceType: payload.resource_type,
+      url: `${apiBaseUrl}/editor-images/render/${this.createImageToken(key)}`,
+      key,
+      bytes: file.size,
+      mimeType: file.mimetype,
     };
   }
 
+  /**
+   * Resolves a signed editor-image token and returns the private S3 object.
+   *
+   * @param token - Opaque signed token generated by upload().
+   * @returns Binary image object and content type.
+   */
+  async getImageByToken(token: string): Promise<EditorImageObject> {
+    const key = this.verifyImageToken(token);
+    const buffer = await this.s3.getBuffer(key);
+    const contentType = this.contentTypeFromKey(key);
+
+    return { buffer, contentType, key };
+  }
+
   private validateFile(file: Express.Multer.File) {
-    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+    const extension = ALLOWED_IMAGE_TYPES.get(file.mimetype);
+    if (!extension) {
       throw new UnsupportedMediaTypeException(
         'Only AVIF, GIF, JPEG, PNG, and WebP images are allowed.',
       );
@@ -145,20 +103,79 @@ export class EditorImagesService {
         `Image must be smaller than ${Math.round(this.maxImageBytes / 1024 / 1024)} MB.`,
       );
     }
+
+    return extension;
   }
 
-  private signCloudinaryParams(
-    params: Record<string, string>,
-    apiSecret: string,
-  ) {
-    const payload = Object.keys(params)
-      .sort()
-      .map((key) => `${key}=${params[key]}`)
-      .join('&');
+  private buildObjectKey(userId: string, extension: string) {
+    const random = crypto.randomBytes(24).toString('hex');
+    return `${EDITOR_IMAGE_PREFIX}/${userId}/${random}.${extension}`;
+  }
+
+  private createImageToken(key: string) {
+    const payload = Buffer.from(
+      JSON.stringify({ v: TOKEN_VERSION, key }),
+      'utf8',
+    ).toString('base64url');
+    const signature = this.sign(payload);
+
+    return `${payload}.${signature}`;
+  }
+
+  private verifyImageToken(token: string) {
+    const [payload, signature] = token.split('.');
+    if (!payload || !signature) {
+      throw new BadRequestException('Invalid image token.');
+    }
+
+    const expected = this.sign(payload);
+    const actualBuffer = Buffer.from(signature, 'base64url');
+    const expectedBuffer = Buffer.from(expected, 'base64url');
+
+    if (
+      actualBuffer.length !== expectedBuffer.length ||
+      !crypto.timingSafeEqual(actualBuffer, expectedBuffer)
+    ) {
+      throw new BadRequestException('Invalid image token.');
+    }
+
+    let parsed: { v?: string; key?: string };
+    try {
+      parsed = JSON.parse(
+        Buffer.from(payload, 'base64url').toString('utf8'),
+      ) as {
+        v?: string;
+        key?: string;
+      };
+    } catch {
+      throw new BadRequestException('Invalid image token.');
+    }
+
+    if (
+      parsed.v !== TOKEN_VERSION ||
+      typeof parsed.key !== 'string' ||
+      !parsed.key.startsWith(`${EDITOR_IMAGE_PREFIX}/`)
+    ) {
+      throw new BadRequestException('Invalid image token.');
+    }
+
+    return parsed.key;
+  }
+
+  private sign(payload: string) {
+    const secret = this.config.getOrThrow<string>('ENCRYPTION_SECRET');
 
     return crypto
-      .createHash('sha1')
-      .update(`${payload}${apiSecret}`)
-      .digest('hex');
+      .createHmac('sha256', secret)
+      .update(payload)
+      .digest('base64url');
+  }
+
+  private contentTypeFromKey(key: string) {
+    if (key.endsWith('.avif')) return 'image/avif';
+    if (key.endsWith('.gif')) return 'image/gif';
+    if (key.endsWith('.png')) return 'image/png';
+    if (key.endsWith('.webp')) return 'image/webp';
+    return 'image/jpeg';
   }
 }

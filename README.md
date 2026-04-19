@@ -23,7 +23,7 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Invitation issuance, review, and acceptance
 - Public authenticity verification payload
 - Document activity and access audits
-- Cloudinary-backed editor image uploads for rich-text documents
+- Private S3-backed editor image uploads for rich-text documents
 
 ## Core Skills Needed
 
@@ -44,7 +44,7 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Lightweight metadata refresh for collaborative UI clients
 - Normalized page layout persistence so editor and export geometry stay aligned
 - Shared JWT validation against the auth service secret without reissuing tokens
-- Server-side Cloudinary upload signing so editor image credentials never reach the browser
+- Private S3 editor image storage with stable signed render URLs for rich-text content
 
 ## Main Modules
 
@@ -63,7 +63,7 @@ src/
     users/          user lookup for sharing
     folders/        folder lifecycle
     templates/      template listing and usage
-    editor-images/  authenticated Cloudinary image uploads for editor content
+    editor-images/  authenticated S3 image uploads for editor content
     documents/      document lifecycle, sharing, signing, verification
   seeds/            optional seed data
 ```
@@ -106,10 +106,7 @@ AWS_REGION=
 AWS_ACCESS_KEY_ID=
 AWS_SECRET_ACCESS_KEY=
 AWS_S3_BUCKET_NAME=
-CLOUDINARY_CLOUD_NAME=
-CLOUDINARY_API_KEY=
-CLOUDINARY_API_SECRET=
-CLOUDINARY_EDITOR_IMAGES_FOLDER=gracon/documents/editor-images
+DOCUMENTS_API_PUBLIC_URL=http://localhost:3005/api/v1
 EDITOR_IMAGE_MAX_SIZE_BYTES=8388608
 MAIL_HOST=
 MAIL_PORT=

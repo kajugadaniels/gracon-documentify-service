@@ -80,28 +80,16 @@ class EnvironmentVariables {
   @IsNotEmpty()
   MAIL_FROM: string;
 
-  @IsOptional()
-  @IsString()
-  CLOUDINARY_CLOUD_NAME?: string;
-
-  @IsOptional()
-  @IsString()
-  CLOUDINARY_API_KEY?: string;
-
-  @IsOptional()
-  @IsString()
-  CLOUDINARY_API_SECRET?: string;
-
-  @IsOptional()
-  @IsString()
-  CLOUDINARY_EDITOR_IMAGES_FOLDER?: string;
-
   @Transform(({ value }) => parseInt(value, 10))
   @IsOptional()
   @IsNumber()
   @Min(1024 * 1024)
   @Max(20 * 1024 * 1024)
   EDITOR_IMAGE_MAX_SIZE_BYTES?: number;
+
+  @IsOptional()
+  @IsString()
+  DOCUMENTS_API_PUBLIC_URL?: string;
 
   @Transform(({ value }) => parseInt(value, 10))
   @IsOptional()

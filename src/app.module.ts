@@ -12,6 +12,7 @@ import { DocumentsModule } from './modules/documents/documents.module';
 import { TemplatesModule } from './modules/templates/templates.module';
 import { FoldersModule } from './modules/folders/folders.module';
 import { UsersModule } from './modules/users/users.module';
+import { EditorImagesModule } from './modules/editor-images/editor-images.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { UsersModule } from './modules/users/users.module';
     TemplatesModule,
     FoldersModule,
     UsersModule,
+    EditorImagesModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: CustomThrottlerGuard }],
 })

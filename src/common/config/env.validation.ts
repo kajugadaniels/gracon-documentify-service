@@ -33,8 +33,7 @@ class EnvironmentVariables {
 
   @IsString()
   @MinLength(32, {
-    message:
-      'ENCRYPTION_SECRET must be at least 32 chars and match api/auth/',
+    message: 'ENCRYPTION_SECRET must be at least 32 chars and match api/auth/',
   })
   ENCRYPTION_SECRET: string;
 
@@ -80,6 +79,29 @@ class EnvironmentVariables {
   @IsString()
   @IsNotEmpty()
   MAIL_FROM: string;
+
+  @IsOptional()
+  @IsString()
+  CLOUDINARY_CLOUD_NAME?: string;
+
+  @IsOptional()
+  @IsString()
+  CLOUDINARY_API_KEY?: string;
+
+  @IsOptional()
+  @IsString()
+  CLOUDINARY_API_SECRET?: string;
+
+  @IsOptional()
+  @IsString()
+  CLOUDINARY_EDITOR_IMAGES_FOLDER?: string;
+
+  @Transform(({ value }) => parseInt(value, 10))
+  @IsOptional()
+  @IsNumber()
+  @Min(1024 * 1024)
+  @Max(20 * 1024 * 1024)
+  EDITOR_IMAGE_MAX_SIZE_BYTES?: number;
 
   @Transform(({ value }) => parseInt(value, 10))
   @IsOptional()

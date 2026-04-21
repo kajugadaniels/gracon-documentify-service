@@ -196,3 +196,15 @@ Step 2 starts the first real unit coverage with pure helper specs under:
 - `src/common/prisma/*.spec.ts`
 - `src/common/security/*.spec.ts`
 - `src/common/config/*.spec.ts`
+
+Step 3 extracts document permission rules into a pure helper under:
+
+- `src/modules/documents/helpers/document-permissions.helper.ts`
+- `src/modules/documents/helpers/document-permissions.helper.spec.ts`
+
+That helper is now the source of truth for:
+
+- canonical permission ordering
+- legacy role-to-permission fallback
+- accepted-active collaborator gating
+- owner vs collaborator permission checks

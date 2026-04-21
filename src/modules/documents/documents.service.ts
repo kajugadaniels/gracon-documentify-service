@@ -79,6 +79,15 @@ import {
   resolveInvitationGateNextStep,
   resolveInvitationVerificationSessionExpiry as resolveInvitationVerificationSessionExpiryRule,
 } from './helpers/document-invitation.helper';
+import {
+  describeDocumentPermissions,
+  describeInvitationExpiryDuration,
+  formatDocumentUserDisplayName,
+  getDocumentInviterDisplayName,
+  maskDocumentRecipientEmail,
+  resolveDocumentAuditLimit,
+  sanitizeDocumentAccessAuditMetadata,
+} from './helpers/document-access-formatting.helper';
 
 // Default empty Tiptap document structure
 const EMPTY_RICH_TEXT_CONTENT = {
@@ -3978,12 +3987,7 @@ export class DocumentsService {
   }
 
   private resolveAuditLimit(rawLimit?: string): number {
-    const parsed = rawLimit ? Number.parseInt(rawLimit, 10) : 50;
-    if (!Number.isInteger(parsed)) {
-      return 50;
-    }
-
-    return Math.min(Math.max(parsed, 1), 100);
+    return resolveDocumentAuditLimit(rawLimit);
   }
 
   private extractBearerToken(authHeader?: string | null): string | null {
@@ -4432,59 +4436,7 @@ export class DocumentsService {
   private sanitizeAccessAuditMetadata(
     metadata: Prisma.JsonValue | null,
   ): Record<string, unknown> | null {
-    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
-      return null;
-    }
-
-    const source = metadata as Record<string, unknown>;
-    const allowedKeys = [
-      'acceptedAt',
-      'anchored',
-      'commentId',
-      'completedSignatureCount',
-      'declinedAt',
-      'emailOtpExpiresAt',
-      'emailOtpSentAt',
-      'emailOtpVerifiedAt',
-      'expiresAt',
-      'failReason',
-      'identityChallengeStartedAt',
-      'identityVerificationFailedAt',
-      'identityVerificationAttemptId',
-      'identityVerifiedAt',
-      'lockedAt',
-      'notePresent',
-      'openedAt',
-      'pendingSignatureCount',
-      'parentCommentId',
-      'previousStatus',
-      'reason',
-      'remainingAttempts',
-      'resent',
-      'retryAfterSeconds',
-      'retryAt',
-      'resolvedAt',
-      'sentAt',
-      'signingOrder',
-      'tokenType',
-      'totalRequired',
-      'totalSigned',
-    ];
-    const sanitized: Record<string, unknown> = {};
-
-    for (const key of allowedKeys) {
-      const value = source[key];
-      if (
-        typeof value === 'string' ||
-        typeof value === 'number' ||
-        typeof value === 'boolean' ||
-        value === null
-      ) {
-        sanitized[key] = value;
-      }
-    }
-
-    return Object.keys(sanitized).length > 0 ? sanitized : null;
+    return sanitizeDocumentAccessAuditMetadata(metadata);
   }
 
   private formatAuditUser(user: {
@@ -4654,33 +4606,11 @@ export class DocumentsService {
   private describePermissions(
     permissions: CollaboratorPermission[],
   ): string {
-    const labels = permissions
-      .filter((permission) => permission !== CollaboratorPermission.READ)
-      .map((permission) => {
-        if (permission === CollaboratorPermission.MANAGE_ACCESS) {
-          return 'manage access';
-        }
-
-        return permission.toLowerCase();
-      });
-
-    if (labels.length === 0) {
-      return 'read access';
-    }
-
-    if (labels.length === 1) {
-      return `${labels[0]} access`;
-    }
-
-    const head = labels.slice(0, -1).join(', ');
-    const tail = labels.at(-1);
-    return `${head} and ${tail} access`;
+    return describeDocumentPermissions(permissions);
   }
 
   private describeInvitationExpiry(expiry: Date): string {
-    const diffMs = expiry.getTime() - Date.now();
-    const days = Math.max(1, Math.ceil(diffMs / (24 * 60 * 60 * 1000)));
-    return days === 1 ? '1 day' : `${days} days`;
+    return describeInvitationExpiryDuration(expiry);
   }
 
   private formatUserDisplayName(
@@ -4688,32 +4618,17 @@ export class DocumentsService {
     surName: string | null,
     fallback: string,
   ): string {
-    const fullName = `${postNames ?? ''} ${surName ?? ''}`.trim();
-    return fullName || fallback;
+    return formatDocumentUserDisplayName(postNames, surName, fallback);
   }
 
   private getInviterDisplayName(
     invitedBy: CollaboratorWithProfile['invitedBy'] | InvitationLookupRecord['invitedBy'],
   ): string {
-    if (!invitedBy) {
-      return 'A verified user';
-    }
-
-    return this.formatUserDisplayName(
-      invitedBy.citizenIdentity?.postNames ?? null,
-      invitedBy.citizenIdentity?.surName ?? null,
-      invitedBy.email,
-    );
+    return getDocumentInviterDisplayName(invitedBy);
   }
 
   private maskEmail(email: string): string {
-    const [localPart, domain = ''] = email.split('@');
-    if (!localPart) {
-      return email;
-    }
-
-    const visiblePrefix = localPart.slice(0, 2);
-    return `${visiblePrefix}${'*'.repeat(Math.max(localPart.length - 2, 2))}@${domain}`;
+    return maskDocumentRecipientEmail(email);
   }
 
   private assertInvitationTokenFormat(rawToken: string) {

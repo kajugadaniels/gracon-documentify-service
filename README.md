@@ -236,3 +236,17 @@ That helper is now the source of truth for:
 - email OTP verification outcomes
 - invitation gate next-step resolution
 - completed-review eligibility after OTP and identity verification
+
+Step 6 extracts small branching service methods into a pure helper under:
+
+- `src/modules/documents/helpers/document-access-formatting.helper.ts`
+- `src/modules/documents/helpers/document-access-formatting.helper.spec.ts`
+
+That helper is now the source of truth for:
+
+- audit log limit normalization
+- audit metadata sanitization for persisted response payloads
+- share-permission summary formatting
+- invitation expiry copy
+- user and inviter display-name fallback formatting
+- invitation email masking

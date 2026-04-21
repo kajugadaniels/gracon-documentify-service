@@ -62,6 +62,13 @@ import {
   normalizeDocumentPermissions,
   type DocumentPermissionRecord,
 } from './helpers/document-permissions.helper';
+import {
+  buildRequiredSignerIds,
+  canDocumentAcceptNewSignature,
+  collaboratorRequiresSignature as collaboratorRequiresSignatureRule,
+  evaluateLockDocument,
+  resolveSigningStatusUpdate,
+} from './helpers/document-signing.helper';
 
 // Default empty Tiptap document structure
 const EMPTY_RICH_TEXT_CONTENT = {
@@ -2687,9 +2694,11 @@ export class DocumentsService {
 
     const collaboratorSignerIds =
       await this.getRequiredSignerIdsForDocument(documentId);
-    const signerIds = dto.requireOwnerSignature
-      ? Array.from(new Set([document.ownerId, ...collaboratorSignerIds]))
-      : collaboratorSignerIds;
+    const signerIds = buildRequiredSignerIds({
+      ownerId: document.ownerId,
+      collaboratorSignerIds,
+      requireOwnerSignature: dto.requireOwnerSignature ?? false,
+    });
 
     if (signerIds.length === 0) {
       throw new ConflictException(
@@ -2746,7 +2755,7 @@ export class DocumentsService {
       throw new NotFoundException('Document not found.');
     await this.assertCanSign(userId, documentId, document.ownerId);
 
-    if (document.status !== 'FINALISED' && document.status !== 'SIGNED') {
+    if (!canDocumentAcceptNewSignature(document.status)) {
       throw new ConflictException(
         `Document must be in FINALISED or SIGNED status to record a signature. Current status: ${document.status}.`,
       );
@@ -2897,31 +2906,44 @@ export class DocumentsService {
     if (!document || document.isDeleted)
       throw new NotFoundException('Document not found.');
 
-    if (document.ownerId !== userId) {
-      throw new ForbiddenException(
-        'Only the document owner can lock this document.',
-      );
-    }
-
-    if (document.status !== 'SIGNED') {
-      throw new ConflictException(
-        `Document must be in SIGNED status before locking. Current status: ${document.status}.`,
-      );
-    }
-
     const pendingSignatureCount =
       await this.countUnsignedSignatureRequests(documentId);
-
-    if (pendingSignatureCount > 0) {
-      throw new ConflictException(
-        'All required signatures must be completed before locking this document.',
-      );
-    }
 
     const primarySignature = await this.resolvePrimarySignedDocument(
       documentId,
       document.ownerId,
     );
+
+    const lockDecision = evaluateLockDocument({
+      isOwner: document.ownerId === userId,
+      status: document.status,
+      pendingSignatureCount,
+      hasCompletedSignature: Boolean(primarySignature),
+    });
+
+    if (!lockDecision.allowed) {
+      if (lockDecision.reason === 'NOT_OWNER') {
+        throw new ForbiddenException(
+          'Only the document owner can lock this document.',
+        );
+      }
+
+      if (lockDecision.reason === 'INVALID_STATUS') {
+        throw new ConflictException(
+          `Document must be in SIGNED status before locking. Current status: ${document.status}.`,
+        );
+      }
+
+      if (lockDecision.reason === 'PENDING_SIGNATURES') {
+        throw new ConflictException(
+          'All required signatures must be completed before locking this document.',
+        );
+      }
+
+      throw new ConflictException(
+        'At least one completed signature is required before locking this document.',
+      );
+    }
 
     if (!primarySignature) {
       throw new ConflictException(
@@ -3409,12 +3431,7 @@ export class DocumentsService {
     acceptedAt: Date | null;
     isActive: boolean;
   }): boolean {
-    return (
-      input.isActive &&
-      input.acceptedAt !== null &&
-      input.invitationStatus === CollaboratorInvitationStatus.ACCEPTED &&
-      input.permissions.includes(CollaboratorPermission.SIGN)
-    );
+    return collaboratorRequiresSignatureRule(input);
   }
 
   private async removeUnsignedSignatureRequest(
@@ -3578,20 +3595,17 @@ export class DocumentsService {
           })
         : null;
 
+    const nextSigningState = resolveSigningStatusUpdate({
+      pendingSignatureCount,
+      latestCompletedSignedAt: latestCompletedSignature?.signedAt ?? null,
+    });
+
     await this.prisma.document.updateMany({
       where: {
         id: documentId,
         status: { in: [DocumentStatus.FINALISED, DocumentStatus.SIGNED] },
       },
-      data: latestCompletedSignature?.signedAt
-        ? {
-            status: DocumentStatus.SIGNED,
-            signedAt: latestCompletedSignature.signedAt,
-          }
-        : {
-            status: DocumentStatus.FINALISED,
-            signedAt: null,
-          },
+      data: nextSigningState,
     });
 
     return this.prisma.document.findUnique({ where: { id: documentId } });

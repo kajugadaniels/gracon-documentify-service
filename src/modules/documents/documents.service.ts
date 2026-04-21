@@ -69,6 +69,16 @@ import {
   evaluateLockDocument,
   resolveSigningStatusUpdate,
 } from './helpers/document-signing.helper';
+import {
+  evaluateInvitationEmailOtpRequest,
+  evaluateInvitationEmailOtpVerification,
+  evaluateInvitationLookupState,
+  evaluateInvitationReviewAccess,
+  isValidInvitationTokenFormat,
+  resolveInvitationEmailOtpResendAvailableAt as resolveInvitationEmailOtpResendAvailableAtRule,
+  resolveInvitationGateNextStep,
+  resolveInvitationVerificationSessionExpiry as resolveInvitationVerificationSessionExpiryRule,
+} from './helpers/document-invitation.helper';
 
 // Default empty Tiptap document structure
 const EMPTY_RICH_TEXT_CONTENT = {
@@ -2258,7 +2268,24 @@ export class DocumentsService {
       context,
     );
 
-    if (verificationSession.emailOtpVerifiedAt) {
+    const otpDecision = evaluateInvitationEmailOtpVerification({
+      session: {
+        emailOtpCodeHash: verificationSession.emailOtpCodeHash,
+        emailOtpExpiresAt: verificationSession.emailOtpExpiresAt,
+        emailOtpVerifiedAt: verificationSession.emailOtpVerifiedAt,
+        emailOtpAttemptCount: verificationSession.emailOtpAttemptCount,
+      },
+      now: new Date(),
+      isCodeMatch:
+        verificationSession.emailOtpCodeHash !== null &&
+        this.encryption.compareHash(
+          dto.code,
+          verificationSession.emailOtpCodeHash,
+        ),
+      maxAttempts: INVITATION_EMAIL_OTP_MAX_ATTEMPTS,
+    });
+
+    if (otpDecision.outcome === 'ALREADY_VERIFIED') {
       const syncedSession = await this.syncInvitationIdentityVerification(
         verificationSession,
         invitation,
@@ -2273,16 +2300,13 @@ export class DocumentsService {
       );
     }
 
-    if (
-      !verificationSession.emailOtpCodeHash ||
-      !verificationSession.emailOtpExpiresAt
-    ) {
+    if (otpDecision.outcome === 'REQUEST_REQUIRED') {
       throw new BadRequestException(
         'Request a verification code before continuing.',
       );
     }
 
-    if (verificationSession.emailOtpExpiresAt.getTime() <= Date.now()) {
+    if (otpDecision.outcome === 'EXPIRED') {
       await this.prisma.documentInvitationVerificationSession.update({
         where: { collaboratorId: invitation.id },
         data: {
@@ -2312,26 +2336,17 @@ export class DocumentsService {
       );
     }
 
-    if (
-      verificationSession.emailOtpAttemptCount >=
-      INVITATION_EMAIL_OTP_MAX_ATTEMPTS
-    ) {
+    if (otpDecision.outcome === 'TOO_MANY_ATTEMPTS') {
       throw new HttpException(
         'Too many incorrect codes. Request a new verification code.',
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
 
-    if (
-      !this.encryption.compareHash(
-        dto.code,
-        verificationSession.emailOtpCodeHash,
-      )
-    ) {
-      const attempts = verificationSession.emailOtpAttemptCount + 1;
+    if (otpDecision.outcome === 'INVALID_CODE') {
       await this.prisma.documentInvitationVerificationSession.update({
         where: { collaboratorId: invitation.id },
-        data: { emailOtpAttemptCount: attempts },
+        data: { emailOtpAttemptCount: otpDecision.nextAttemptCount },
       });
 
       await this.recordAccessAudit({
@@ -2345,8 +2360,7 @@ export class DocumentsService {
         invitationStatus: invitation.invitationStatus,
         metadata: {
           reason: 'invalid_code',
-          remainingAttempts:
-            Math.max(INVITATION_EMAIL_OTP_MAX_ATTEMPTS - attempts, 0),
+          remainingAttempts: otpDecision.remainingAttempts,
         },
         ...context,
       });
@@ -4040,18 +4054,11 @@ export class DocumentsService {
   private resolveInvitationVerificationSessionExpiry(
     invitation: InvitationLookupRecord,
   ) {
-    const maxExpiry = new Date(
-      Date.now() + INVITATION_VERIFICATION_SESSION_TTL_MS,
-    );
-
-    if (
-      invitation.invitationExpiresAt &&
-      invitation.invitationExpiresAt.getTime() < maxExpiry.getTime()
-    ) {
-      return invitation.invitationExpiresAt;
-    }
-
-    return maxExpiry;
+    return resolveInvitationVerificationSessionExpiryRule({
+      invitationExpiresAt: invitation.invitationExpiresAt,
+      now: new Date(),
+      sessionTtlMs: INVITATION_VERIFICATION_SESSION_TTL_MS,
+    });
   }
 
   private async ensureInvitationVerificationSession(
@@ -4134,49 +4141,36 @@ export class DocumentsService {
   private resolveInvitationEmailOtpResendAvailableAt(
     session: InvitationVerificationSessionRecord,
   ): Date | null {
-    if (!session.emailOtpSentAt) {
-      return null;
-    }
-
-    return new Date(
-      session.emailOtpSentAt.getTime() +
-        INVITATION_EMAIL_OTP_RESEND_COOLDOWN_MS,
+    return resolveInvitationEmailOtpResendAvailableAtRule(
+      session.emailOtpSentAt,
+      INVITATION_EMAIL_OTP_RESEND_COOLDOWN_MS,
     );
   }
 
   private assertInvitationEmailOtpRequestAllowed(
     session: InvitationVerificationSessionRecord,
   ) {
-    const now = Date.now();
-    const resendAvailableAt =
-      this.resolveInvitationEmailOtpResendAvailableAt(session);
+    const decision = evaluateInvitationEmailOtpRequest({
+      session,
+      now: new Date(),
+      resendCooldownMs: INVITATION_EMAIL_OTP_RESEND_COOLDOWN_MS,
+      maxRequestsPerHour: INVITATION_EMAIL_OTP_MAX_REQUESTS_PER_HOUR,
+    });
 
-    if (resendAvailableAt && resendAvailableAt.getTime() > now) {
+    if (!decision.allowed && decision.reason === 'RESEND_COOLDOWN') {
       throw new HttpException({
         message: 'Wait before requesting another verification code.',
-        retryAt: resendAvailableAt.toISOString(),
-        retryAfterSeconds: Math.ceil(
-          (resendAvailableAt.getTime() - now) / 1000,
-        ),
+        retryAt: decision.retryAt.toISOString(),
+        retryAfterSeconds: decision.retryAfterSeconds,
       }, HttpStatus.TOO_MANY_REQUESTS);
     }
 
-    const isInActiveWindow =
-      session.emailOtpWindowStartedAt &&
-      now - session.emailOtpWindowStartedAt.getTime() < 60 * 60 * 1000;
-
-    if (
-      isInActiveWindow &&
-      session.emailOtpRequestCount >= INVITATION_EMAIL_OTP_MAX_REQUESTS_PER_HOUR
-    ) {
-      const retryAt = new Date(
-        session.emailOtpWindowStartedAt!.getTime() + 60 * 60 * 1000,
-      );
+    if (!decision.allowed && decision.reason === 'RATE_LIMIT') {
       throw new HttpException({
         message:
           'Too many verification codes have been requested. Try again later.',
-        retryAt: retryAt.toISOString(),
-        retryAfterSeconds: Math.ceil((retryAt.getTime() - now) / 1000),
+        retryAt: decision.retryAt.toISOString(),
+        retryAfterSeconds: decision.retryAfterSeconds,
       }, HttpStatus.TOO_MANY_REQUESTS);
     }
   }
@@ -4344,11 +4338,7 @@ export class DocumentsService {
   ) {
     const resendAvailableAt =
       this.resolveInvitationEmailOtpResendAvailableAt(session);
-    const nextStep = !session.emailOtpVerifiedAt
-      ? 'email_otp'
-      : session.completedAt
-        ? 'review'
-        : 'identity_verification';
+    const nextStep = resolveInvitationGateNextStep(session);
 
     return {
       status: 'pending' as const,
@@ -4392,32 +4382,45 @@ export class DocumentsService {
         where: { collaboratorId: invitation.id },
       });
 
-    if (!session || !session.emailOtpVerifiedAt) {
+    const reviewDecision = evaluateInvitationReviewAccess({
+      session,
+      now: new Date(),
+    });
+
+    if (!reviewDecision.allowed && reviewDecision.reason === 'EMAIL_OTP_REQUIRED') {
       throw new ForbiddenException(
         'Complete the invitation email verification step before continuing.',
       );
     }
 
-    if (session.expiresAt.getTime() <= Date.now()) {
+    if (!reviewDecision.allowed && reviewDecision.reason === 'SESSION_EXPIRED') {
       throw new ForbiddenException(
         'This invitation verification session expired. Restart the verification steps.',
       );
     }
 
-    const challengedSession = await this.beginInvitationIdentityChallenge(
-      session,
-      invitation,
-      invitation.userId,
-      {},
-    );
-    const syncedSession = await this.syncInvitationIdentityVerification(
-      challengedSession,
-      invitation,
-      invitation.userId,
-      {},
-    );
+    if (!reviewDecision.allowed && reviewDecision.reason === 'IDENTITY_VERIFICATION_REQUIRED') {
+      const challengedSession = await this.beginInvitationIdentityChallenge(
+        session!,
+        invitation,
+        invitation.userId,
+        {},
+      );
+      const syncedSession = await this.syncInvitationIdentityVerification(
+        challengedSession,
+        invitation,
+        invitation.userId,
+        {},
+      );
 
-    if (!syncedSession.completedAt) {
+      if (!syncedSession.completedAt) {
+        throw new ForbiddenException(
+          'Complete the invitation identity verification step before continuing.',
+        );
+      }
+    }
+
+    if (!reviewDecision.allowed && reviewDecision.reason !== 'IDENTITY_VERIFICATION_REQUIRED') {
       throw new ForbiddenException(
         'Complete the invitation identity verification step before continuing.',
       );
@@ -4714,7 +4717,7 @@ export class DocumentsService {
   }
 
   private assertInvitationTokenFormat(rawToken: string) {
-    if (!/^[a-f0-9]{64}$/i.test(rawToken)) {
+    if (!isValidInvitationTokenFormat(rawToken)) {
       throw new NotFoundException('Invitation not found or expired.');
     }
   }
@@ -4783,11 +4786,15 @@ export class DocumentsService {
       throw new NotFoundException('Invitation not found or expired.');
     }
 
-    if (
-      invitation.invitationStatus === CollaboratorInvitationStatus.PENDING &&
-      invitation.invitationExpiresAt &&
-      invitation.invitationExpiresAt.getTime() <= Date.now()
-    ) {
+    const invitationState = evaluateInvitationLookupState(
+      {
+        invitationStatus: invitation.invitationStatus,
+        invitationExpiresAt: invitation.invitationExpiresAt,
+      },
+      new Date(),
+    );
+
+    if (invitationState === 'EXPIRED') {
       await this.prisma.documentCollaborator.update({
         where: { id: invitation.id },
         data: {
@@ -4799,7 +4806,7 @@ export class DocumentsService {
       throw new ConflictException('This invitation has expired.');
     }
 
-    if (invitation.invitationStatus !== CollaboratorInvitationStatus.PENDING) {
+    if (invitationState === 'INACTIVE') {
       throw new ConflictException('This invitation is no longer active.');
     }
 

@@ -208,3 +208,16 @@ That helper is now the source of truth for:
 - legacy role-to-permission fallback
 - accepted-active collaborator gating
 - owner vs collaborator permission checks
+
+Step 4 extracts signing workflow rules into a pure helper under:
+
+- `src/modules/documents/helpers/document-signing.helper.ts`
+- `src/modules/documents/helpers/document-signing.helper.spec.ts`
+
+That helper is now the source of truth for:
+
+- required signer resolution during finalisation
+- collaborator signature eligibility
+- which document statuses can accept new signatures
+- when signing state stays `FINALISED` vs becomes `SIGNED`
+- owner-only lock preconditions

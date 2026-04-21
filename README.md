@@ -89,6 +89,9 @@ npm install
 npm run start:dev
 npm run build
 npm run test
+npm run test:unit
+npm run test:e2e
+npm run test:all
 npm run lint
 npx prisma generate
 ```
@@ -139,3 +142,50 @@ APP_URL=http://localhost:4002
 - Record audit entries for state-changing collaboration actions
 - Preserve current signing semantics: explicit signers, explicit owner lock
 - Build and verify the public verification payload after data-model changes
+
+## Testing Rule
+
+- If code is pure logic or can be mocked cleanly, add a unit test.
+- If code depends on Nest bootstrapping, DB wiring, or HTTP flow, prefer e2e or integration tests.
+
+## Testing Layout
+
+Use one testing shape consistently across this service.
+
+- Put unit tests beside the code they cover under `src/**` using `*.spec.ts`.
+- Put HTTP/bootstrap tests under `test/` and keep them behind `npm run test:e2e`.
+- Put reusable builders and narrow shared fixtures in `src/test-utils/`.
+- Keep unit tests deterministic: no real S3, SMTP, Prisma, or JWT network calls.
+- If a service method needs too many mocks, extract the branching logic into a helper first and test that helper.
+
+Current command split:
+
+- `npm run test` or `npm run test:unit`: unit tests under `src/**`
+- `npm run test:e2e`: Nest bootstrap and HTTP-flow tests under `test/`
+- `npm run test:all`: both layers in sequence
+
+## Unit Testing Priorities
+
+Add unit tests in this order instead of trying to cover the whole service at once.
+
+1. Permission rules
+   owner vs collaborator access, edit/view/sign rights, lock/finalise restrictions, and invitation acceptance eligibility
+2. Signing workflow rules
+   who can sign, who can only lock, when a document becomes locked, and multi-signature completion logic
+3. Invitation and token logic
+   token expiration, invalid token rejection, already-used invitation rejection, and verification-gated acceptance rules
+4. Export and import helpers
+   PDF/DOCX layout transforms, page geometry mapping, margin/indent/tab-stop conversion, and image/export metadata formatting
+5. Validation and normalization helpers
+   URL sanitizers, filename builders, content-state validators, and status-transition validators
+6. Small branching service methods
+   document status transitions, share permission mapping, audit event payload creation, and certificate/signature eligibility checks
+
+## Current Test Foundation
+
+Step 1 is complete when these conventions exist and are used consistently:
+
+- explicit unit and e2e commands
+- a stable place for test helpers in `src/test-utils/`
+- no mixing of HTTP-flow tests into unit suites
+- no new business terminology invented only for tests

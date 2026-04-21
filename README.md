@@ -189,3 +189,10 @@ Step 1 is complete when these conventions exist and are used consistently:
 - a stable place for test helpers in `src/test-utils/`
 - no mixing of HTTP-flow tests into unit suites
 - no new business terminology invented only for tests
+
+Step 2 starts the first real unit coverage with pure helper specs under:
+
+- `src/common/helpers/*.spec.ts`
+- `src/common/prisma/*.spec.ts`
+- `src/common/security/*.spec.ts`
+- `src/common/config/*.spec.ts`

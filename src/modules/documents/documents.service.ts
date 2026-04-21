@@ -53,6 +53,15 @@ import {
   VerifyInvitationEmailOtpDto,
 } from './dto/invitation-email-otp.dto';
 import type { RequestUser } from '../auth/interfaces/jwt-payload.interface';
+import {
+  deriveCollaboratorRoleFromPermissions,
+  DOCUMENT_PERMISSION_ORDER,
+  getEffectiveDocumentPermissions,
+  getLegacyPermissionsForRole,
+  hasDocumentPermission,
+  normalizeDocumentPermissions,
+  type DocumentPermissionRecord,
+} from './helpers/document-permissions.helper';
 
 // Default empty Tiptap document structure
 const EMPTY_RICH_TEXT_CONTENT = {
@@ -94,14 +103,6 @@ const INVITATION_EMAIL_OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 const INVITATION_EMAIL_OTP_MAX_REQUESTS_PER_HOUR = 3;
 const INVITATION_EMAIL_OTP_MAX_ATTEMPTS = 5;
 const INVITATION_VERIFICATION_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-const CANONICAL_PERMISSION_ORDER: CollaboratorPermission[] = [
-  CollaboratorPermission.READ,
-  CollaboratorPermission.COMMENT,
-  CollaboratorPermission.SIGN,
-  CollaboratorPermission.EDIT,
-  CollaboratorPermission.MANAGE_ACCESS,
-];
-
 type AccessAuditContext = {
   ipAddress?: string | null;
   userAgent?: string | null;
@@ -3864,48 +3865,23 @@ export class DocumentsService {
       | null,
     permission: CollaboratorPermission,
   ): boolean {
-    if (!collaborator) {
-      return false;
-    }
-
-    if (
-      !collaborator.isActive ||
-      collaborator.acceptedAt === null ||
-      collaborator.invitationStatus !== CollaboratorInvitationStatus.ACCEPTED
-    ) {
-      return false;
-    }
-
-    return this.getEffectivePermissions(collaborator).includes(permission);
+    return hasDocumentPermission(
+      collaborator as DocumentPermissionRecord | null,
+      permission,
+    );
   }
 
   private getEffectivePermissions(collaborator: {
     role: CollaboratorRole;
     permissions: CollaboratorPermission[];
   }): CollaboratorPermission[] {
-    if (collaborator.permissions.length > 0) {
-      return collaborator.permissions;
-    }
-
-    return this.getLegacyPermissions(collaborator.role);
+    return getEffectiveDocumentPermissions(collaborator);
   }
 
   private getLegacyPermissions(
     role: CollaboratorRole,
   ): CollaboratorPermission[] {
-    if (role === CollaboratorRole.EDITOR) {
-      return [
-        CollaboratorPermission.READ,
-        CollaboratorPermission.COMMENT,
-        CollaboratorPermission.EDIT,
-      ];
-    }
-
-    if (role === CollaboratorRole.SIGNER) {
-      return [CollaboratorPermission.READ, CollaboratorPermission.SIGN];
-    }
-
-    return [CollaboratorPermission.READ, CollaboratorPermission.COMMENT];
+    return getLegacyPermissionsForRole(role);
   }
 
   private buildDocumentListWhere(
@@ -3957,7 +3933,7 @@ export class DocumentsService {
       role: isOwner ? 'OWNER' : collaborator?.role ?? null,
       collaboratorId: collaborator?.id ?? null,
       permissions: isOwner
-        ? CANONICAL_PERMISSION_ORDER
+        ? DOCUMENT_PERMISSION_ORDER
         : collaborator
           ? this.getEffectivePermissions(collaborator)
           : [],
@@ -4600,39 +4576,23 @@ export class DocumentsService {
   private normalizePermissions(
     permissions: CollaboratorPermissionValue[],
   ): CollaboratorPermission[] {
-    const unique = new Set<CollaboratorPermission>();
+    const normalized = normalizeDocumentPermissions(
+      permissions as CollaboratorPermission[],
+    );
 
-    for (const permission of permissions) {
-      unique.add(permission as CollaboratorPermission);
-    }
-
-    if (unique.size === 0) {
+    if (normalized.length === 0) {
       throw new BadRequestException(
         'At least one permission must be granted to share this document.',
       );
     }
 
-    if (unique.size > 0) {
-      unique.add(CollaboratorPermission.READ);
-    }
-
-    return CANONICAL_PERMISSION_ORDER.filter((permission) =>
-      unique.has(permission),
-    );
+    return normalized;
   }
 
   private deriveLegacyRole(
     permissions: CollaboratorPermission[],
   ): CollaboratorRole {
-    if (permissions.includes(CollaboratorPermission.EDIT)) {
-      return CollaboratorRole.EDITOR;
-    }
-
-    if (permissions.includes(CollaboratorPermission.SIGN)) {
-      return CollaboratorRole.SIGNER;
-    }
-
-    return CollaboratorRole.VIEWER;
+    return deriveCollaboratorRoleFromPermissions(permissions);
   }
 
   private buildInvitationExpiry(expiresInDays?: number): Date {

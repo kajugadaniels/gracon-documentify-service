@@ -221,3 +221,18 @@ That helper is now the source of truth for:
 - which document statuses can accept new signatures
 - when signing state stays `FINALISED` vs becomes `SIGNED`
 - owner-only lock preconditions
+
+Step 5 extracts invitation and token rules into a pure helper under:
+
+- `src/modules/documents/helpers/document-invitation.helper.ts`
+- `src/modules/documents/helpers/document-invitation.helper.spec.ts`
+
+That helper is now the source of truth for:
+
+- invitation token format validation
+- active vs expired vs inactive invitation state
+- verification-session expiry resolution
+- email OTP resend and hourly request throttling
+- email OTP verification outcomes
+- invitation gate next-step resolution
+- completed-review eligibility after OTP and identity verification

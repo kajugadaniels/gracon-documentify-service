@@ -250,3 +250,17 @@ That helper is now the source of truth for:
 - invitation expiry copy
 - user and inviter display-name fallback formatting
 - invitation email masking
+
+Step 7 keeps Nest bootstrapping, guards, DTO validation, and HTTP-flow behavior in e2e tests under:
+
+- `test/app.e2e-spec.ts`
+
+That suite now covers:
+
+- public invitation preview without authentication
+- protected invitation review authentication enforcement
+- authenticated `@CurrentUser()` injection into protected routes
+- raw authorization-header forwarding on public invitation gate resolution
+- DTO validation for invitation email OTP request and verification
+- authenticated document creation route wiring
+- query-parameter transformation on document listing

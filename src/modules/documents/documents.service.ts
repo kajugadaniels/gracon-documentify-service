@@ -1,3 +1,13 @@
+/**
+ * DocumentsService
+ *
+ * Owns the full document lifecycle: creation, autosave, version history,
+ * sharing, invitation gating, signing/locking workflow, and verification.
+ *
+ * Most pure logic lives in the sibling `helpers/` directory. This file
+ * focuses on the orchestration: Prisma reads/writes, S3 access, audit
+ * logging, mailer dispatch, and applying the rules from those helpers.
+ */
 import {
   Injectable,
   NotFoundException,
@@ -38,10 +48,7 @@ import {
 } from './dto/update-document.dto';
 import { FinaliseDocumentDto } from './dto/finalise-document.dto';
 import { SignDocumentDto } from './dto/sign-document.dto';
-import {
-  QueryDocumentsDto,
-  type DocumentListScope,
-} from './dto/query-documents.dto';
+import { QueryDocumentsDto } from './dto/query-documents.dto';
 import {
   ShareDocumentAccessDto,
   UpdateDocumentAccessDto,
@@ -53,6 +60,11 @@ import {
   VerifyInvitationEmailOtpDto,
 } from './dto/invitation-email-otp.dto';
 import type { RequestUser } from '../auth/interfaces/jwt-payload.interface';
+// ─── Helper modules ─────────────────────────────────────────────────────────
+//
+// Permission rules, signing rules, invitation/OTP rules, and access
+// formatting all live in dedicated pure helpers under ./helpers. The service
+// composes them; it does not reimplement them.
 import {
   deriveCollaboratorRoleFromPermissions,
   DOCUMENT_PERMISSION_ORDER,
@@ -88,299 +100,69 @@ import {
   resolveDocumentAuditLimit,
   sanitizeDocumentAccessAuditMetadata,
 } from './helpers/document-access-formatting.helper';
+import { extractBearerToken } from './helpers/document-auth.helper';
+import {
+  alignmentToSignaturePosition,
+  buildNextCopyTitleFromExistingTitles,
+  DEFAULT_SIGNATURE_X,
+  DEFAULT_SIGNATURE_Y,
+  EMPTY_RICH_TEXT_CONTENT,
+  EMPTY_SPREADSHEET_CONTENT,
+  resolveTemplateVariables,
+  stripCopySuffix,
+} from './helpers/document-content.helper';
+import {
+  DEFAULT_DOCUMENT_LAYOUT,
+  mergeDocumentLayout,
+  normalizeDocumentLayout,
+  type DocumentLayout,
+  type DocumentLayoutMargins,
+} from './helpers/document-layout.helper';
+import { buildDocumentListWhere } from './helpers/document-query.helper';
+import {
+  buildDocumentAccessSummary,
+  formatAuditUser,
+  formatCollaboratorAccess,
+  formatDocumentComment,
+  formatDocumentRecord,
+  formatSignatureRequestSummary,
+} from './helpers/document-format.helper';
+import {
+  buildDocumentEditUrl,
+  buildInvitationExpiry,
+  buildInvitationUrl,
+} from './helpers/document-url.helper';
+import {
+  buildSignatureReminderCooldownMap,
+  getSignatureReminderRequestId,
+  SIGNATURE_REMINDER_COOLDOWN_MS,
+} from './helpers/document-signature-reminder.helper';
+import {
+  COMPLETED_SIGNATURE_SELECT,
+  SIGNATURE_REQUEST_PROGRESS_SELECT,
+  SIGNATURE_REQUEST_SUMMARY_SELECT,
+  type AccessAuditContext,
+  type CollaboratorWithProfile,
+  type CompletedSignatureRecord,
+  type CompletedSignatureSummary,
+  type InvitationLookupRecord,
+  type InvitationVerificationSessionRecord,
+  type SignatureRequestSummary,
+  type SignedDocumentForLock,
+} from './helpers/document-record.types';
 
-// Default empty Tiptap document structure
-const EMPTY_RICH_TEXT_CONTENT = {
-  type: 'doc',
-  content: [{ type: 'paragraph' }],
-};
+// ─── Tunables specific to invitation OTP gating ─────────────────────────────
+//
+// These are kept here because they are passed into the invitation helper
+// rules per-call. Promoting them to env vars later will only require touching
+// this block.
 
-// Default empty spreadsheet structure
-const EMPTY_SPREADSHEET_CONTENT = {
-  type: 'spreadsheet',
-  sheets: [
-    {
-      id: 'sheet-1',
-      name: 'Sheet 1',
-      rows: 50,
-      cols: 26,
-      cells: {},
-    },
-  ],
-};
-
-// Default position — bottom-right area of the A4 page (normalized 0–1)
-const DEFAULT_SIGNATURE_X = 0.57;
-const DEFAULT_SIGNATURE_Y = 0.78;
-const DEFAULT_DOCUMENT_LAYOUT = {
-  paperSize: 'A4',
-  margins: {
-    top: 96,
-    right: 96,
-    bottom: 96,
-    left: 96,
-  },
-} as const;
-const DEFAULT_INVITATION_EXPIRY_DAYS = 7;
-const SIGNATURE_REMINDER_COOLDOWN_MS = 15 * 60 * 1000;
 const INVITATION_EMAIL_OTP_LENGTH = 6;
 const INVITATION_EMAIL_OTP_EXPIRY_MS = 10 * 60 * 1000;
 const INVITATION_EMAIL_OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 const INVITATION_EMAIL_OTP_MAX_REQUESTS_PER_HOUR = 3;
 const INVITATION_EMAIL_OTP_MAX_ATTEMPTS = 5;
 const INVITATION_VERIFICATION_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-type AccessAuditContext = {
-  ipAddress?: string | null;
-  userAgent?: string | null;
-};
-
-type CollaboratorAccessRecord = {
-  id: string;
-  userId: string;
-  role: CollaboratorRole;
-  permissions: CollaboratorPermission[];
-  invitationStatus: CollaboratorInvitationStatus;
-  invitationExpiresAt: Date | null;
-  invitationEmailSentAt: Date | null;
-  invitationOpenedAt: Date | null;
-  invitedAt: Date;
-  acceptedAt: Date | null;
-  declinedAt: Date | null;
-  revokedAt: Date | null;
-  note: string | null;
-  isActive: boolean;
-};
-
-type CollaboratorWithProfile = CollaboratorAccessRecord & {
-  user: {
-    email: string;
-    imageUrl: string | null;
-    citizenIdentity: {
-      surName: string;
-      postNames: string;
-    } | null;
-  };
-  invitedBy: {
-    id: string;
-    email: string;
-    citizenIdentity: {
-      surName: string;
-      postNames: string;
-    } | null;
-  } | null;
-};
-
-type InvitationLookupRecord = {
-  id: string;
-  documentId: string;
-  userId: string;
-  permissions: CollaboratorPermission[];
-  invitationStatus: CollaboratorInvitationStatus;
-  invitationTokenHash: string | null;
-  invitationExpiresAt: Date | null;
-  invitationEmailSentAt: Date | null;
-  invitationOpenedAt: Date | null;
-  invitedAt: Date;
-  acceptedAt: Date | null;
-  declinedAt: Date | null;
-  revokedAt: Date | null;
-  note: string | null;
-  isActive: boolean;
-  document: {
-    id: string;
-    title: string;
-    isDeleted: boolean;
-  };
-  user: {
-    email: string;
-    imageUrl: string | null;
-    citizenIdentity: {
-      surName: string;
-      postNames: string;
-    } | null;
-  };
-  invitedBy: {
-    id: string;
-    email: string;
-    citizenIdentity: {
-      surName: string;
-      postNames: string;
-    } | null;
-  } | null;
-};
-
-type InvitationVerificationSessionRecord = {
-  id: string;
-  collaboratorId: string;
-  documentId: string;
-  userId: string;
-  emailOtpCodeHash: string | null;
-  emailOtpSentAt: Date | null;
-  emailOtpExpiresAt: Date | null;
-  emailOtpVerifiedAt: Date | null;
-  emailOtpAttemptCount: number;
-  emailOtpRequestCount: number;
-  emailOtpWindowStartedAt: Date | null;
-  identityChallengeStartedAt: Date | null;
-  identityFailureAttemptId: string | null;
-  identityVerificationAttemptId: string | null;
-  identityVerifiedAt: Date | null;
-  completedAt: Date | null;
-  expiresAt: Date;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-type DocumentAccessCollaboratorSummary = {
-  id: string;
-  userId: string;
-  role: CollaboratorRole;
-  permissions: CollaboratorPermission[];
-  acceptedAt: Date | null;
-  invitedBy: {
-    id: string;
-    email: string;
-    citizenIdentity: {
-      surName: string;
-      postNames: string;
-    } | null;
-  } | null;
-};
-
-type DocumentCommentAuthorRecord = {
-  id: string;
-  email: string;
-  imageUrl: string | null;
-  citizenIdentity: {
-    surName: string;
-    postNames: string;
-  } | null;
-};
-
-type DocumentCommentReplyRecord = {
-  id: string;
-  authorId: string;
-  parentCommentId: string | null;
-  anchorText: string | null;
-  anchorFrom: number | null;
-  anchorTo: number | null;
-  content: string;
-  resolvedAt: Date | null;
-  createdAt: Date;
-  updatedAt: Date;
-  author: DocumentCommentAuthorRecord;
-};
-
-type DocumentCommentRecord = DocumentCommentReplyRecord & {
-  replies: DocumentCommentReplyRecord[];
-};
-
-const SIGNATURE_REQUEST_SUMMARY_SELECT = {
-  id: true,
-  requestedById: true,
-  requestedUserId: true,
-  status: true,
-  personalSignedDocumentId: true,
-  signerDisplayNameSnapshot: true,
-  signerEmailSnapshot: true,
-  signatureImageS3KeySnapshot: true,
-  signatureImageMimeTypeSnapshot: true,
-  signatureImageSizeBytesSnapshot: true,
-  signedAt: true,
-  createdAt: true,
-  updatedAt: true,
-} satisfies Prisma.DocumentSignatureRequestSelect;
-
-const SIGNATURE_REQUEST_PROGRESS_SELECT = {
-  ...SIGNATURE_REQUEST_SUMMARY_SELECT,
-  requestedUser: {
-    select: {
-      id: true,
-      email: true,
-      imageUrl: true,
-      citizenIdentity: {
-        select: { surName: true, postNames: true },
-      },
-    },
-  },
-} satisfies Prisma.DocumentSignatureRequestSelect;
-
-const COMPLETED_SIGNATURE_SELECT =
-  SIGNATURE_REQUEST_PROGRESS_SELECT satisfies Prisma.DocumentSignatureRequestSelect;
-
-type SignatureRequestBaseRecord = Prisma.DocumentSignatureRequestGetPayload<{
-  select: typeof SIGNATURE_REQUEST_SUMMARY_SELECT;
-}>;
-
-type SignatureRequestProgressRecord =
-  Prisma.DocumentSignatureRequestGetPayload<{
-    select: typeof SIGNATURE_REQUEST_PROGRESS_SELECT;
-  }>;
-
-type CompletedSignatureRecord = Prisma.DocumentSignatureRequestGetPayload<{
-  select: typeof COMPLETED_SIGNATURE_SELECT;
-}>;
-
-type SignatureRequestUserSummary = {
-  id: string;
-  email: string;
-  imageUrl: string | null;
-  displayName: string;
-  surName: string | null;
-  postNames: string | null;
-};
-
-type SignatureRequestSummary = SignatureRequestBaseRecord & {
-  requestedUser?: SignatureRequestUserSummary | null;
-  nextReminderAvailableAt?: Date | null;
-};
-
-type SignedDocumentForLock = {
-  id: string;
-  userId: string;
-  signedAt: Date;
-  certificateId: string;
-  signerDisplayNameSnapshot: string | null;
-  signerEmailSnapshot: string | null;
-  signatureImageS3KeySnapshot: string | null;
-  signatureImageMimeTypeSnapshot: string | null;
-  signatureImageSizeBytesSnapshot: number | null;
-};
-
-type CompletedSignatureSummary = {
-  signatureId: string;
-  certificateId: string | null;
-  signerId: string;
-  signerName: string;
-  signerEmail: string;
-  imageUrl: string | null;
-  mimeType: string | null;
-  sizeBytes: number | null;
-  signedAt: Date;
-  isOwner: boolean;
-};
-
-type DocumentLayoutMargins = {
-  top: number;
-  right: number;
-  bottom: number;
-  left: number;
-};
-
-type DocumentLayout = {
-  paperSize: 'A4';
-  margins: DocumentLayoutMargins;
-};
-
-// Backward-compat: derive x/y from old alignment enum for documents
-// that were locked before free placement was introduced.
-function alignmentToPosition(
-  alignment: string | null | undefined,
-): { x: number; y: number } {
-  if (alignment === 'LEFT') return { x: 0.02, y: DEFAULT_SIGNATURE_Y };
-  if (alignment === 'CENTER') return { x: 0.29, y: DEFAULT_SIGNATURE_Y };
-  return { x: DEFAULT_SIGNATURE_X, y: DEFAULT_SIGNATURE_Y };
-}
 
 @Injectable()
 export class DocumentsService {
@@ -430,7 +212,7 @@ export class DocumentsService {
         include: { citizenIdentity: true, platformId: true },
       });
 
-      initialContent = this.resolveTemplateVariables(
+      initialContent = resolveTemplateVariables(
         template.contentJson as Record<string, unknown>,
         {
           USER_FULL_NAME:
@@ -477,7 +259,7 @@ export class DocumentsService {
     // Create first version snapshot
     await this.createVersionSnapshot(document.id, userId, initialContent, 1);
 
-    return this.formatDocument(updated);
+    return formatDocumentRecord(updated);
   }
 
   async makeCopy(userId: string, documentId: string) {
@@ -497,7 +279,7 @@ export class DocumentsService {
         ? EMPTY_RICH_TEXT_CONTENT
         : EMPTY_SPREADSHEET_CONTENT;
 
-    const baseTitle = this.stripCopySuffix(source.title);
+    const baseTitle = stripCopySuffix(source.title);
     const title = await this.buildNextCopyTitle(userId, baseTitle);
     const folderId = await this.resolveCopyFolderId(userId, source);
 
@@ -510,7 +292,7 @@ export class DocumentsService {
         folderId,
         tags: source.tags,
         wordCount: source.wordCount,
-        layout: this.normalizeDocumentLayout(source.layout) as Prisma.InputJsonValue,
+        layout: normalizeDocumentLayout(source.layout) as Prisma.InputJsonValue,
       },
     });
 
@@ -524,7 +306,7 @@ export class DocumentsService {
 
     await this.createVersionSnapshot(copy.id, userId, content, 1);
 
-    return this.formatDocument(updated);
+    return formatDocumentRecord(updated);
   }
 
   // ─── List ────────────────────────────────────────────────────────────────────
@@ -554,7 +336,7 @@ export class DocumentsService {
       invitationStatus: CollaboratorInvitationStatus.ACCEPTED,
       permissions: { has: CollaboratorPermission.READ },
     };
-    const where = this.buildDocumentListWhere(
+    const where = buildDocumentListWhere(
       userId,
       scope,
       baseWhere,
@@ -609,8 +391,8 @@ export class DocumentsService {
       page: dto.page ?? 1,
       limit: dto.limit ?? 20,
       items: items.map((item) => ({
-        ...this.formatDocument(item),
-        access: this.buildDocumentAccessSummary(userId, item),
+        ...formatDocumentRecord(item),
+        access: buildDocumentAccessSummary(userId, item),
       })),
     };
   }
@@ -677,14 +459,14 @@ export class DocumentsService {
         documentId,
         CollaboratorPermission.MANAGE_ACCESS,
       ));
-    const result: Record<string, unknown> = this.formatDocument(document);
-    result['access'] = this.buildDocumentAccessSummary(userId, document);
+    const result: Record<string, unknown> = formatDocumentRecord(document);
+    result['access'] = buildDocumentAccessSummary(userId, document);
     result['signatureRequests'] = canManageAccess
       ? await this.getSignatureRequestSummaries(documentId, true)
       : document.signatureRequests;
     result['collaborators'] = canManageAccess
       ? document.collaborators.map((collaborator) =>
-          this.formatCollaboratorAccess(collaborator),
+          formatCollaboratorAccess(collaborator),
         )
       : [];
 
@@ -766,7 +548,7 @@ export class DocumentsService {
       documentId: document.id,
       title: document.title,
       collaborators: document.collaborators.map((collaborator) =>
-        this.formatCollaboratorAccess(collaborator),
+        formatCollaboratorAccess(collaborator),
       ),
     };
   }
@@ -791,7 +573,7 @@ export class DocumentsService {
       );
     }
 
-    const limit = this.resolveAuditLimit(rawLimit);
+    const limit = resolveDocumentAuditLimit(rawLimit);
     const events = await this.prisma.documentAccessAuditLog.findMany({
       where: { documentId },
       orderBy: { createdAt: 'desc' },
@@ -837,10 +619,10 @@ export class DocumentsService {
         metadata: this.sanitizeAccessAuditMetadata(event.metadata),
         createdAt: event.createdAt,
         actor: event.actorUser
-          ? this.formatAuditUser(event.actorUser)
+          ? formatAuditUser(event.actorUser)
           : null,
         target: event.targetUser
-          ? this.formatAuditUser(event.targetUser)
+          ? formatAuditUser(event.targetUser)
           : null,
       })),
     };
@@ -899,7 +681,7 @@ export class DocumentsService {
           if (leftResolved !== rightResolved) return leftResolved - rightResolved;
           return right.createdAt.getTime() - left.createdAt.getTime();
         })
-        .map((comment) => this.formatDocumentComment(comment)),
+        .map((comment) => formatDocumentComment(comment)),
     };
   }
 
@@ -1018,7 +800,7 @@ export class DocumentsService {
       },
     });
 
-    return this.formatDocumentComment(comment);
+    return formatDocumentComment(comment);
   }
 
   async resolveComment(userId: string, documentId: string, commentId: string) {
@@ -1099,7 +881,7 @@ export class DocumentsService {
       });
     }
 
-    return this.formatDocumentComment(comment);
+    return formatDocumentComment(comment);
   }
 
   async shareAccess(
@@ -1154,7 +936,7 @@ export class DocumentsService {
     }
 
     const role = this.deriveLegacyRole(permissions);
-    const invitationExpiresAt = this.buildInvitationExpiry(dto.expiresInDays);
+    const invitationExpiresAt = buildInvitationExpiry(dto.expiresInDays);
 
     const existing = await this.prisma.documentCollaborator.findUnique({
       where: { documentId_userId: { documentId, userId: dto.userId } },
@@ -1341,7 +1123,7 @@ export class DocumentsService {
           senderName: this.getInviterDisplayName(saved.invitedBy),
           accessSummary: this.describePermissions(permissions),
           note: dto.note?.trim() || null,
-          acceptUrl: this.buildInvitationUrl(rawInvitationToken),
+          acceptUrl: buildInvitationUrl(this.resolveDocumentsFrontendUrl(), rawInvitationToken),
           expiresIn: this.describeInvitationExpiry(invitationExpiresAt),
         });
 
@@ -1433,7 +1215,7 @@ export class DocumentsService {
     });
 
     return {
-      ...this.formatCollaboratorAccess(finalCollaborator),
+      ...formatCollaboratorAccess(finalCollaborator),
       emailStatus,
     };
   }
@@ -1557,7 +1339,7 @@ export class DocumentsService {
       isActive: updated.isActive,
     });
 
-    return this.formatCollaboratorAccess(updated);
+    return formatCollaboratorAccess(updated);
   }
 
   async resendAccessInvitation(
@@ -1629,7 +1411,7 @@ export class DocumentsService {
 
     const rawInvitationToken = crypto.randomBytes(32).toString('hex');
     const invitationTokenHash = this.encryption.hash(rawInvitationToken);
-    const invitationExpiresAt = this.buildInvitationExpiry();
+    const invitationExpiresAt = buildInvitationExpiry();
     const previousStatus = collaborator.invitationStatus;
 
     const saved = await this.prisma.documentCollaborator.update({
@@ -1727,7 +1509,7 @@ export class DocumentsService {
         senderName: this.getInviterDisplayName(saved.invitedBy),
         accessSummary: this.describePermissions(saved.permissions),
         note: saved.note,
-        acceptUrl: this.buildInvitationUrl(rawInvitationToken),
+        acceptUrl: buildInvitationUrl(this.resolveDocumentsFrontendUrl(), rawInvitationToken),
         expiresIn: this.describeInvitationExpiry(invitationExpiresAt),
       });
 
@@ -1807,7 +1589,7 @@ export class DocumentsService {
     }
 
     return {
-      ...this.formatCollaboratorAccess(finalCollaborator),
+      ...formatCollaboratorAccess(finalCollaborator),
       emailStatus,
     };
   }
@@ -1902,7 +1684,7 @@ export class DocumentsService {
           actor?.email ?? 'A document access manager',
         ),
         documentTitle: document.title,
-        signUrl: this.buildDocumentEditUrl(documentId),
+        signUrl: buildDocumentEditUrl(this.resolveDocumentsFrontendUrl(), documentId),
       });
 
       await this.recordAccessAudit({
@@ -2678,7 +2460,7 @@ export class DocumentsService {
     dto: UpdateDocumentDto,
   ) {
     const document = await this.getEditableDocument(userId, documentId);
-    const layout = this.mergeDocumentLayout(document.layout, dto.layout);
+    const layout = mergeDocumentLayout(document.layout, dto.layout);
 
     const updated = await this.prisma.document.update({
       where: { id: document.id },
@@ -2689,7 +2471,7 @@ export class DocumentsService {
       },
     });
 
-    return this.formatDocument(updated);
+    return formatDocumentRecord(updated);
   }
 
   // ─── Finalise ────────────────────────────────────────────────────────────────
@@ -2757,7 +2539,7 @@ export class DocumentsService {
     );
 
     return {
-      ...this.formatDocument(updated),
+      ...formatDocumentRecord(updated),
       contentHash,
       signatureRequests,
       pendingSignatureCount:
@@ -2884,7 +2666,7 @@ export class DocumentsService {
 
     if (pendingSignatureCount > 0) {
       return {
-        ...this.formatDocument(updated ?? document),
+        ...formatDocumentRecord(updated ?? document),
         signatureRequests: await this.getSignatureRequestSummaries(
           documentId,
           includeSignerProfiles,
@@ -2905,7 +2687,7 @@ export class DocumentsService {
     }
 
     return {
-      ...this.formatDocument(updated),
+      ...formatDocumentRecord(updated),
       signatureSnapshot: await this.buildSignatureSnapshot(updated),
       signatureId: dto.signatureId,
       signatureRequests: await this.getSignatureRequestSummaries(
@@ -3038,7 +2820,7 @@ export class DocumentsService {
     });
 
     return {
-      ...this.formatDocument(updated),
+      ...formatDocumentRecord(updated),
       signatureSnapshot: await this.buildSignatureSnapshot(updated),
       signatureRequests: await this.getSignatureRequestSummaries(
         documentId,
@@ -3110,7 +2892,7 @@ export class DocumentsService {
     });
 
     return {
-      ...this.formatDocument(updated),
+      ...formatDocumentRecord(updated),
       signatureSnapshot: await this.buildSignatureSnapshot(updated),
     };
   }
@@ -3388,7 +3170,7 @@ export class DocumentsService {
       await this.getSignatureReminderCooldowns(documentId);
 
     return requests.map((request) => ({
-      ...this.formatSignatureRequestSummary(request),
+      ...formatSignatureRequestSummary(request),
       nextReminderAvailableAt: reminderCooldowns.get(request.id) ?? null,
     }));
   }
@@ -3525,7 +3307,7 @@ export class DocumentsService {
       });
     const recentForRequest = recentReminderEvents.find(
       (event) =>
-        this.getSignatureReminderRequestId(event.metadata) === requestId,
+        getSignatureReminderRequestId(event.metadata) === requestId,
     );
 
     if (!recentForRequest) {
@@ -3577,7 +3359,7 @@ export class DocumentsService {
     const cooldowns = new Map<string, Date>();
 
     for (const event of events) {
-      const requestId = this.getSignatureReminderRequestId(event.metadata);
+      const requestId = getSignatureReminderRequestId(event.metadata);
       if (!requestId || cooldowns.has(requestId)) {
         continue;
       }
@@ -3589,17 +3371,6 @@ export class DocumentsService {
     }
 
     return cooldowns;
-  }
-
-  private getSignatureReminderRequestId(
-    metadata: Prisma.JsonValue | null,
-  ): string | null {
-    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
-      return null;
-    }
-
-    const requestId = (metadata as Record<string, unknown>)['requestId'];
-    return typeof requestId === 'string' ? requestId : null;
   }
 
   private async syncDocumentSigningStatus(documentId: string) {
@@ -3921,92 +3692,10 @@ export class DocumentsService {
     return getLegacyPermissionsForRole(role);
   }
 
-  private buildDocumentListWhere(
-    userId: string,
-    scope: DocumentListScope,
-    baseWhere: Prisma.DocumentWhereInput,
-    acceptedSharedAccess: Prisma.DocumentCollaboratorWhereInput,
-  ): Prisma.DocumentWhereInput {
-    if (scope === 'OWNED') {
-      return {
-        ...baseWhere,
-        ownerId: userId,
-      };
-    }
-
-    if (scope === 'SHARED_WITH_ME') {
-      return {
-        ...baseWhere,
-        ownerId: { not: userId },
-        collaborators: { some: acceptedSharedAccess },
-      };
-    }
-
-    return {
-      ...baseWhere,
-      OR: [
-        { ownerId: userId },
-        {
-          ownerId: { not: userId },
-          collaborators: { some: acceptedSharedAccess },
-        },
-      ],
-    };
-  }
-
-  private buildDocumentAccessSummary(
-    userId: string,
-    document: {
-      ownerId: string;
-      collaborators?: DocumentAccessCollaboratorSummary[];
-    },
-  ) {
-    const isOwner = document.ownerId === userId;
-    const collaborator =
-      document.collaborators?.find((entry) => entry.userId === userId) ?? null;
-
-    return {
-      isOwner,
-      role: isOwner ? 'OWNER' : collaborator?.role ?? null,
-      collaboratorId: collaborator?.id ?? null,
-      permissions: isOwner
-        ? DOCUMENT_PERMISSION_ORDER
-        : collaborator
-          ? this.getEffectivePermissions(collaborator)
-          : [],
-      acceptedAt: collaborator?.acceptedAt ?? null,
-      sharedBy:
-        !isOwner && collaborator?.invitedBy
-          ? {
-              id: collaborator.invitedBy.id,
-              email: collaborator.invitedBy.email,
-              displayName: this.getInviterDisplayName(collaborator.invitedBy),
-            }
-          : null,
-    };
-  }
-
-  private resolveAuditLimit(rawLimit?: string): number {
-    return resolveDocumentAuditLimit(rawLimit);
-  }
-
-  private extractBearerToken(authHeader?: string | null): string | null {
-    if (!authHeader) {
-      return null;
-    }
-
-    const [scheme, token] = authHeader.split(' ');
-    if (scheme !== 'Bearer' || !token) {
-      return null;
-    }
-
-    return token.trim() || null;
-  }
-
   private async resolveInvitationSessionUser(
     authHeader?: string | null,
   ): Promise<RequestUser | null> {
-    const token = this.extractBearerToken(authHeader);
+    const token = extractBearerToken(authHeader);
     if (!token) {
       return null;
     }
@@ -4439,109 +4128,6 @@ export class DocumentsService {
     return sanitizeDocumentAccessAuditMetadata(metadata);
   }
 
-  private formatAuditUser(user: {
-    id: string;
-    email: string;
-    citizenIdentity: {
-      surName: string;
-      postNames: string;
-    } | null;
-  }) {
-    return {
-      id: user.id,
-      email: user.email,
-      displayName: this.formatUserDisplayName(
-        user.citizenIdentity?.postNames ?? null,
-        user.citizenIdentity?.surName ?? null,
-        user.email,
-      ),
-    };
-  }
-
-  private formatSignatureRequestSummary(
-    request: SignatureRequestProgressRecord,
-  ): SignatureRequestSummary {
-    const requestedUser = request.requestedUser;
-
-    return {
-      id: request.id,
-      requestedById: request.requestedById,
-      requestedUserId: request.requestedUserId,
-      status: request.status,
-      personalSignedDocumentId: request.personalSignedDocumentId,
-      signerDisplayNameSnapshot: request.signerDisplayNameSnapshot,
-      signerEmailSnapshot: request.signerEmailSnapshot,
-      signatureImageS3KeySnapshot: request.signatureImageS3KeySnapshot,
-      signatureImageMimeTypeSnapshot: request.signatureImageMimeTypeSnapshot,
-      signatureImageSizeBytesSnapshot:
-        request.signatureImageSizeBytesSnapshot,
-      signedAt: request.signedAt,
-      createdAt: request.createdAt,
-      updatedAt: request.updatedAt,
-      requestedUser: {
-        id: requestedUser.id,
-        email: requestedUser.email,
-        imageUrl: requestedUser.imageUrl,
-        displayName: this.formatUserDisplayName(
-          requestedUser.citizenIdentity?.postNames ?? null,
-          requestedUser.citizenIdentity?.surName ?? null,
-          requestedUser.email,
-        ),
-        surName: requestedUser.citizenIdentity?.surName ?? null,
-        postNames: requestedUser.citizenIdentity?.postNames ?? null,
-      },
-    };
-  }
-
-  private formatDocumentComment(comment: DocumentCommentRecord) {
-    return {
-      id: comment.id,
-      authorId: comment.authorId,
-      parentCommentId: comment.parentCommentId,
-      anchorText: comment.anchorText,
-      anchorFrom: comment.anchorFrom,
-      anchorTo: comment.anchorTo,
-      content: comment.content,
-      resolvedAt: comment.resolvedAt,
-      createdAt: comment.createdAt,
-      updatedAt: comment.updatedAt,
-      author: this.formatCommentAuthor(comment.author),
-      replies: comment.replies.map((reply) =>
-        this.formatDocumentCommentReply(reply),
-      ),
-    };
-  }
-
-  private formatDocumentCommentReply(reply: DocumentCommentReplyRecord) {
-    return {
-      id: reply.id,
-      authorId: reply.authorId,
-      parentCommentId: reply.parentCommentId,
-      anchorText: reply.anchorText,
-      anchorFrom: reply.anchorFrom,
-      anchorTo: reply.anchorTo,
-      content: reply.content,
-      resolvedAt: reply.resolvedAt,
-      createdAt: reply.createdAt,
-      updatedAt: reply.updatedAt,
-      author: this.formatCommentAuthor(reply.author),
-      replies: [],
-    };
-  }
-
-  private formatCommentAuthor(user: DocumentCommentAuthorRecord) {
-    return {
-      id: user.id,
-      email: user.email,
-      imageUrl: user.imageUrl,
-      displayName: this.formatUserDisplayName(
-        user.citizenIdentity?.postNames ?? null,
-        user.citizenIdentity?.surName ?? null,
-        user.email,
-      ),
-    };
-  }
-
   private normalizePermissions(
     permissions: CollaboratorPermissionValue[],
   ): CollaboratorPermission[] {
@@ -4564,24 +4150,13 @@ export class DocumentsService {
     return deriveCollaboratorRoleFromPermissions(permissions);
   }
 
-  private buildInvitationExpiry(expiresInDays?: number): Date {
-    const days = expiresInDays ?? DEFAULT_INVITATION_EXPIRY_DAYS;
-    const safeDays = Math.min(Math.max(days, 1), 30);
-    const expiry = new Date();
-    expiry.setDate(expiry.getDate() + safeDays);
-    return expiry;
-  }
-
-  private buildInvitationUrl(rawToken: string): string {
-    const baseUrl = this.resolveDocumentsFrontendUrl();
-    return `${baseUrl}/invitations/${encodeURIComponent(rawToken)}`;
-  }
-
-  private buildDocumentEditUrl(documentId: string): string {
-    const baseUrl = this.resolveDocumentsFrontendUrl();
-    return `${baseUrl}/documents/${encodeURIComponent(documentId)}/edit`;
-  }
-
+  /**
+   * Resolves the documents-app frontend base URL (no trailing slash) used to
+   * compose invitation and edit URLs. Honours `DOCS_BASE_URL` first, then
+   * falls back to the first entry in `FRONTEND_URLS`, then `FRONTEND_URL`.
+   *
+   * @returns The frontend base URL with any trailing slash trimmed.
+   */
   private resolveDocumentsFrontendUrl(): string {
     const explicit = this.config.get<string>('DOCS_BASE_URL');
     if (explicit?.trim()) {
@@ -4775,45 +4350,6 @@ export class DocumentsService {
     });
   }
 
-  private formatCollaboratorAccess(collaborator: CollaboratorWithProfile) {
-    const displayName = this.formatUserDisplayName(
-      collaborator.user.citizenIdentity?.postNames ?? null,
-      collaborator.user.citizenIdentity?.surName ?? null,
-      collaborator.user.email,
-    );
-
-    return {
-      id: collaborator.id,
-      userId: collaborator.userId,
-      role: collaborator.role,
-      permissions: collaborator.permissions,
-      invitationStatus: collaborator.invitationStatus,
-      invitationExpiresAt: collaborator.invitationExpiresAt,
-      invitationEmailSentAt: collaborator.invitationEmailSentAt,
-      invitationOpenedAt: collaborator.invitationOpenedAt,
-      invitedAt: collaborator.invitedAt,
-      acceptedAt: collaborator.acceptedAt,
-      declinedAt: collaborator.declinedAt,
-      revokedAt: collaborator.revokedAt,
-      note: collaborator.note,
-      isActive: collaborator.isActive,
-      user: {
-        email: collaborator.user.email,
-        imageUrl: collaborator.user.imageUrl,
-        displayName,
-        surName: collaborator.user.citizenIdentity?.surName ?? null,
-        postNames: collaborator.user.citizenIdentity?.postNames ?? null,
-      },
-      invitedBy: collaborator.invitedBy
-        ? {
-            id: collaborator.invitedBy.id,
-            email: collaborator.invitedBy.email,
-            displayName: this.getInviterDisplayName(collaborator.invitedBy),
-          }
-        : null,
-    };
-  }
-
   private async recordAccessAudit(params: {
     documentId: string;
     collaboratorId: string | null;
@@ -4903,25 +4439,19 @@ export class DocumentsService {
     }
   }
 
-  private resolveTemplateVariables(
-    content: Record<string, unknown>,
-    variables: Record<string, string>,
-  ): Record<string, unknown> {
-    const contentStr = JSON.stringify(content);
-    const resolved = contentStr.replace(
-      /\{\{([A-Z_]+)\}\}/g,
-      (_, key: string) => variables[key] ?? `{{${key}}}`,
-    );
-    return JSON.parse(resolved) as Record<string, unknown>;
-  }
-
-  private stripCopySuffix(title: string) {
-    const normalized = title.trim() || 'Untitled Document';
-    return normalized.replace(/ Copy(?: \(\d+\))?$/, '');
-  }
-
+  /**
+   * Computes the next available copy title for a user by combining their
+   * existing matching titles with the pure naming rule from the content
+   * helper.
+   *
+   * @param userId - Owner whose existing copies should be inspected.
+   * @param baseTitle - Title with any prior copy suffix already stripped.
+   * @returns The new title to assign to the freshly created copy.
+   */
   private async buildNextCopyTitle(userId: string, baseTitle: string) {
     const copyStem = `${baseTitle} Copy`;
+
+    // Pull only the titles we need so the pure helper can compute the next slot.
     const matches = await this.prisma.document.findMany({
       where: {
         ownerId: userId,
@@ -4931,110 +4461,10 @@ export class DocumentsService {
       select: { title: true },
     });
 
-    const usedNumbers = new Set<number>();
-    let hasPlainCopy = false;
-
-    for (const match of matches) {
-      if (match.title === copyStem) {
-        hasPlainCopy = true;
-        continue;
-      }
-
-      const suffix = match.title.slice(copyStem.length);
-      const numberedMatch = suffix.match(/^ \((\d+)\)$/);
-      if (!numberedMatch) continue;
-
-      const value = Number.parseInt(numberedMatch[1], 10);
-      if (Number.isInteger(value) && value >= 1) {
-        usedNumbers.add(value);
-      }
-    }
-
-    if (!hasPlainCopy) {
-      return copyStem;
-    }
-
-    let nextNumber = 1;
-    while (usedNumbers.has(nextNumber)) {
-      nextNumber += 1;
-    }
-
-    return `${copyStem} (${nextNumber})`;
-  }
-
-  private normalizeMarginValue(value: unknown, fallback: number) {
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
-      return fallback;
-    }
-
-    return Math.min(192, Math.max(48, Math.round(value)));
-  }
-
-  private normalizeDocumentLayout(raw: unknown): DocumentLayout {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      return {
-        paperSize: DEFAULT_DOCUMENT_LAYOUT.paperSize,
-        margins: { ...DEFAULT_DOCUMENT_LAYOUT.margins },
-      };
-    }
-
-    const source = raw as Record<string, unknown>;
-    const rawMargins =
-      source['margins'] && typeof source['margins'] === 'object' && !Array.isArray(source['margins'])
-        ? (source['margins'] as Record<string, unknown>)
-        : {};
-
-    return {
-      paperSize: 'A4',
-      margins: {
-        top: this.normalizeMarginValue(rawMargins['top'], DEFAULT_DOCUMENT_LAYOUT.margins.top),
-        right: this.normalizeMarginValue(rawMargins['right'], DEFAULT_DOCUMENT_LAYOUT.margins.right),
-        bottom: this.normalizeMarginValue(rawMargins['bottom'], DEFAULT_DOCUMENT_LAYOUT.margins.bottom),
-        left: this.normalizeMarginValue(rawMargins['left'], DEFAULT_DOCUMENT_LAYOUT.margins.left),
-      },
-    };
-  }
-
-  private mergeDocumentLayout(
-    currentLayout: unknown,
-    nextLayout?: {
-      paperSize?: 'A4';
-      margins?: Partial<DocumentLayoutMargins>;
-    },
-  ): DocumentLayout {
-    const current = this.normalizeDocumentLayout(currentLayout);
-
-    if (!nextLayout) {
-      return current;
-    }
-
-    return this.normalizeDocumentLayout({
-      paperSize: nextLayout.paperSize ?? current.paperSize,
-      margins: {
-        ...current.margins,
-        ...(nextLayout.margins ?? {}),
-      },
-    });
-  }
-
-  private formatDocument(doc: Record<string, unknown>) {
-    return {
-      id: doc['id'],
-      title: doc['title'],
-      type: doc['type'],
-      status: doc['status'],
-      tags: doc['tags'],
-      wordCount: doc['wordCount'],
-      folderId: doc['folderId'],
-      contentHash: doc['contentHash'],
-      createdAt: doc['createdAt'],
-      updatedAt: doc['updatedAt'],
-      finalisedAt: doc['finalisedAt'],
-      signedAt: doc['signedAt'],
-      lockedAt: doc['lockedAt'],
-      layout: this.normalizeDocumentLayout(doc['layout']),
-      signatureSnapshot: null,
-    };
+    return buildNextCopyTitleFromExistingTitles(
+      baseTitle,
+      matches.map((row) => row.title),
+    );
   }
 
   private async buildSignatureSnapshot(
@@ -5065,7 +4495,7 @@ export class DocumentsService {
     // Prefer stored x/y; fall back to position derived from legacy alignment enum.
     const storedX = typeof doc['signatureBlockX'] === 'number' ? doc['signatureBlockX'] : null;
     const storedY = typeof doc['signatureBlockY'] === 'number' ? doc['signatureBlockY'] : null;
-    const fallback = alignmentToPosition(
+    const fallback = alignmentToSignaturePosition(
       typeof doc['signatureBlockAlignment'] === 'string'
         ? doc['signatureBlockAlignment']
         : null,

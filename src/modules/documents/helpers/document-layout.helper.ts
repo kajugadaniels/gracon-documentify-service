@@ -1,5 +1,5 @@
 /**
- * Pure helpers for the persisted document layout model (paper size + margins).
+ * Pure helpers for the persisted document layout model.
  *
  * The documents service, the editor page, the PDF exporter, and the DOCX
  * exporter all need to agree on one canonical shape. This module is the
@@ -21,6 +21,15 @@ export type DocumentLayoutMargins = {
 export type DocumentLayout = {
   paperSize: 'A4';
   margins: DocumentLayoutMargins;
+  headerFooter: DocumentHeaderFooter;
+};
+
+export type DocumentHeaderFooter = {
+  headerEnabled: boolean;
+  footerEnabled: boolean;
+  pageNumbersEnabled: boolean;
+  headerText: string;
+  footerText: string;
 };
 
 // ─── Defaults and bounds ────────────────────────────────────────────────────
@@ -33,6 +42,7 @@ const MIN_MARGIN_PX = 48;
 
 /** Largest acceptable margin value in pixels (≈ 2in at 96 DPI). */
 const MAX_MARGIN_PX = 192;
+const MAX_HEADER_FOOTER_TEXT_LENGTH = 120;
 
 /** Canonical fallback layout used when no layout is persisted yet. */
 export const DEFAULT_DOCUMENT_LAYOUT: DocumentLayout = {
@@ -42,6 +52,13 @@ export const DEFAULT_DOCUMENT_LAYOUT: DocumentLayout = {
     right: 96,
     bottom: 96,
     left: 96,
+  },
+  headerFooter: {
+    headerEnabled: true,
+    footerEnabled: true,
+    pageNumbersEnabled: true,
+    headerText: '',
+    footerText: '',
   },
 };
 
@@ -66,6 +83,36 @@ export function normalizeDocumentMarginValue(
   return Math.min(MAX_MARGIN_PX, Math.max(MIN_MARGIN_PX, Math.round(value)));
 }
 
+function normalizeBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function normalizeHeaderFooterText(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value.trim().slice(0, MAX_HEADER_FOOTER_TEXT_LENGTH);
+}
+
+function normalizeHeaderFooter(raw: unknown): DocumentHeaderFooter {
+  const defaults = DEFAULT_DOCUMENT_LAYOUT.headerFooter;
+
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ...defaults };
+  }
+
+  const source = raw as Record<string, unknown>;
+
+  return {
+    headerEnabled: normalizeBoolean(source['headerEnabled'], defaults.headerEnabled),
+    footerEnabled: normalizeBoolean(source['footerEnabled'], defaults.footerEnabled),
+    pageNumbersEnabled: normalizeBoolean(source['pageNumbersEnabled'], defaults.pageNumbersEnabled),
+    headerText: normalizeHeaderFooterText(source['headerText']),
+    footerText: normalizeHeaderFooterText(source['footerText']),
+  };
+}
+
 /**
  * Normalises a raw `layout` JSON blob (as stored on the Document table) into
  * the canonical {@link DocumentLayout} shape.
@@ -81,6 +128,7 @@ export function normalizeDocumentLayout(raw: unknown): DocumentLayout {
     return {
       paperSize: DEFAULT_DOCUMENT_LAYOUT.paperSize,
       margins: { ...DEFAULT_DOCUMENT_LAYOUT.margins },
+      headerFooter: { ...DEFAULT_DOCUMENT_LAYOUT.headerFooter },
     };
   }
 
@@ -98,6 +146,7 @@ export function normalizeDocumentLayout(raw: unknown): DocumentLayout {
       bottom: normalizeDocumentMarginValue(rawMargins['bottom'], DEFAULT_DOCUMENT_LAYOUT.margins.bottom),
       left: normalizeDocumentMarginValue(rawMargins['left'], DEFAULT_DOCUMENT_LAYOUT.margins.left),
     },
+    headerFooter: normalizeHeaderFooter(source['headerFooter']),
   };
 }
 
@@ -114,6 +163,7 @@ export function mergeDocumentLayout(
   nextLayout?: {
     paperSize?: 'A4';
     margins?: Partial<DocumentLayoutMargins>;
+    headerFooter?: Partial<DocumentHeaderFooter>;
   },
 ): DocumentLayout {
   const current = normalizeDocumentLayout(currentLayout);
@@ -127,6 +177,10 @@ export function mergeDocumentLayout(
     margins: {
       ...current.margins,
       ...(nextLayout.margins ?? {}),
+    },
+    headerFooter: {
+      ...current.headerFooter,
+      ...(nextLayout.headerFooter ?? {}),
     },
   });
 }

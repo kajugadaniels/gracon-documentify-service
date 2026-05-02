@@ -5,6 +5,7 @@ import {
   IsArray,
   IsObject,
   IsNumber,
+  IsBoolean,
   Min,
   Max,
   ValidateNested,
@@ -43,6 +44,35 @@ export class DocumentLayoutMarginsDto {
   left?: number;
 }
 
+export class DocumentHeaderFooterDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  headerEnabled?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  footerEnabled?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  pageNumbersEnabled?: boolean;
+
+  @ApiPropertyOptional({ maxLength: 120 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  headerText?: string;
+
+  @ApiPropertyOptional({ maxLength: 120 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  footerText?: string;
+}
+
 export class DocumentLayoutDto {
   @ApiPropertyOptional({ enum: ['A4'], description: 'Persisted paper size.' })
   @IsOptional()
@@ -57,6 +87,15 @@ export class DocumentLayoutDto {
   @ValidateNested()
   @Type(() => DocumentLayoutMarginsDto)
   margins?: DocumentLayoutMarginsDto;
+
+  @ApiPropertyOptional({
+    type: () => DocumentHeaderFooterDto,
+    description: 'Persisted header, footer, and page number settings.',
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => DocumentHeaderFooterDto)
+  headerFooter?: DocumentHeaderFooterDto;
 }
 
 export class UpdateDocumentDto {

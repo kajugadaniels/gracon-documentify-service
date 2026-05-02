@@ -17,6 +17,7 @@ import {
   HttpException,
   HttpStatus,
   Logger,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import * as crypto from 'crypto';
@@ -470,14 +471,20 @@ export class DocumentsService {
         )
       : [];
 
-    // Fetch content from S3 if requested and key exists
+    // Fetch content from S3 if requested and key exists. This must fail
+    // loudly: returning `content: null` makes the editor render a blank page
+    // and can hide storage credential or object-loss incidents.
     if (includeContent && document.s3ContentKey) {
       try {
         result['content'] = await this.s3.getJson(document.s3ContentKey);
-      } catch {
-        // If S3 fetch fails, return without content but don't throw
-        result['content'] = null;
-        this.logger.warn(`Failed to fetch content for document ${documentId}`);
+      } catch (error) {
+        this.logger.error(
+          `Failed to fetch content for document ${documentId} from ${document.s3ContentKey}`,
+          error,
+        );
+        throw new ServiceUnavailableException(
+          'Document content storage is temporarily unavailable. Please contact support if this continues.',
+        );
       }
     }
 

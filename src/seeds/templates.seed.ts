@@ -381,7 +381,7 @@ const TEMPLATES = [
   {
     name: 'Board Resolution',
     description:
-      'A formal board resolution template for company decisions. Suitable for institutional stamp use.',
+      'A formal board resolution template for digital authority decisions, delegated signing, institutional stamps, and controlled execution.',
     category: 'RESOLUTION',
     type: 'RICH_TEXT',
     contentJson: {
@@ -390,14 +390,14 @@ const TEMPLATES = [
         {
           type: 'heading',
           attrs: { level: 1 },
-          content: [{ type: 'text', text: 'Board Resolution' }],
+          content: [{ type: 'text', text: 'Board Resolution for Digital Authority' }],
         },
         {
           type: 'paragraph',
           content: [
             {
               type: 'text',
-              text: 'Resolution of the Board of Directors of [Company Name]',
+              text: 'Resolution of the Board of Directors of [Institution / Company Name]',
             },
           ],
         },
@@ -410,35 +410,213 @@ const TEMPLATES = [
           content: [
             {
               type: 'text',
-              text: 'The Board of Directors, having reviewed the matter, hereby resolves as follows:',
+              text: 'Prepared by: {{USER_FULL_NAME}} (Platform ID: {{USER_PLATFORM_ID}})',
             },
           ],
         },
         {
           type: 'heading',
           attrs: { level: 2 },
-          content: [{ type: 'text', text: 'Resolution' }],
+          content: [{ type: 'text', text: '1. Meeting and Authority' }],
         },
         {
           type: 'paragraph',
           content: [
             {
               type: 'text',
-              text: '[State the resolution clearly and completely]',
+              text: 'The Board of Directors, having reviewed the operational need for digital signing, institutional stamping, and controlled document execution, confirms that a duly convened meeting was held and that the board had quorum to pass this resolution.',
+            },
+          ],
+        },
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'text',
+              text: 'Meeting reference: [Meeting number / board session reference]',
+            },
+          ],
+        },
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'text',
+              text: 'Chairperson: [Chairperson full name]',
+            },
+          ],
+        },
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'text',
+              text: 'Secretary: [Secretary full name]',
             },
           ],
         },
         {
           type: 'heading',
           attrs: { level: 2 },
-          content: [{ type: 'text', text: 'Vote' }],
+          content: [{ type: 'text', text: '2. Purpose of the Resolution' }],
         },
         {
           type: 'paragraph',
           content: [
             {
               type: 'text',
-              text: 'This resolution was passed by [unanimous vote / majority vote] of the Board.',
+              text: 'The purpose of this resolution is to grant and regulate digital authority for authorised representatives to prepare, review, sign, stamp, finalise, lock, and verify official documents through the Gracon 360 platform.',
+            },
+          ],
+        },
+        {
+          type: 'bulletList',
+          content: [
+            {
+              type: 'listItem',
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [{ type: 'text', text: 'Approve the use of personal digital certificates for authorised signers.' }],
+                },
+              ],
+            },
+            {
+              type: 'listItem',
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [{ type: 'text', text: 'Approve institutional stamping for documents requiring institutional authority.' }],
+                },
+              ],
+            },
+            {
+              type: 'listItem',
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [{ type: 'text', text: 'Define controls for delegated authority, audit trails, revocation, and verification.' }],
+                },
+              ],
+            },
+          ],
+        },
+        { type: 'pageBreak' },
+        {
+          type: 'heading',
+          attrs: { level: 2 },
+          content: [{ type: 'text', text: '3. Resolutions Passed' }],
+        },
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'text',
+              text: 'It is hereby resolved that the following digital authority controls are approved and adopted by the institution:',
+            },
+          ],
+        },
+        {
+          type: 'orderedList',
+          content: [
+            {
+              type: 'listItem',
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [{ type: 'text', text: 'The institution authorises [Authorised Signer Name] to sign official documents using a valid platform-issued certificate.' }],
+                },
+              ],
+            },
+            {
+              type: 'listItem',
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [{ type: 'text', text: 'The institution authorises [Institution Admin / Stamp Officer] to request, manage, and apply institutional stamps where required.' }],
+                },
+              ],
+            },
+            {
+              type: 'listItem',
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [{ type: 'text', text: 'Any certificate revocation, authority removal, or stamp deactivation must be recorded with a clear reason and audit trail.' }],
+                },
+              ],
+            },
+            {
+              type: 'listItem',
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [{ type: 'text', text: 'Finalised documents must preserve verification references, content hashes, signer identity, certificate status, and stamp chain metadata.' }],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          type: 'heading',
+          attrs: { level: 2 },
+          content: [{ type: 'text', text: '4. Authorised Roles' }],
+        },
+        {
+          type: 'table',
+          content: [
+            {
+              type: 'tableRow',
+              content: [
+                { type: 'tableHeader', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Role' }] }] },
+                { type: 'tableHeader', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Person / Office' }] }] },
+                { type: 'tableHeader', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Authority Scope' }] }] },
+              ],
+            },
+            {
+              type: 'tableRow',
+              content: [
+                { type: 'tableCell', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Primary signer' }] }] },
+                { type: 'tableCell', content: [{ type: 'paragraph', content: [{ type: 'text', text: '[Full name]' }] }] },
+                { type: 'tableCell', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Sign approved institutional documents' }] }] },
+              ],
+            },
+            {
+              type: 'tableRow',
+              content: [
+                { type: 'tableCell', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Stamp officer' }] }] },
+                { type: 'tableCell', content: [{ type: 'paragraph', content: [{ type: 'text', text: '[Full name]' }] }] },
+                { type: 'tableCell', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Apply institutional stamps after required approvals' }] }] },
+              ],
+            },
+          ],
+        },
+        { type: 'pageBreak' },
+        {
+          type: 'heading',
+          attrs: { level: 2 },
+          content: [{ type: 'text', text: '5. Validity and Review' }],
+        },
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'text',
+              text: 'This authority becomes effective on {{DATE}} and remains valid until revoked, replaced, or superseded by a later board resolution. The authority must be reviewed at least annually or immediately after a material governance, security, or personnel change.',
+            },
+          ],
+        },
+        {
+          type: 'heading',
+          attrs: { level: 2 },
+          content: [{ type: 'text', text: '6. Certification' }],
+        },
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'text',
+              text: 'This resolution was passed by [unanimous vote / majority vote] of the Board and is certified as a true record of the decision.',
             },
           ],
         },
@@ -450,6 +628,14 @@ const TEMPLATES = [
               text: 'Certified by: {{USER_FULL_NAME}} — {{DATE}}',
             },
           ],
+        },
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text: 'Board Chairperson: ______________________________' }],
+        },
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text: 'Secretary: ______________________________________' }],
         },
       ],
     },

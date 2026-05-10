@@ -1,6 +1,16 @@
-import { CollaboratorInvitationStatus } from '@prisma/client';
+import {
+  CollaboratorInvitationStatus,
+  DocumentInvitationVerificationRequirement,
+} from '@prisma/client';
 
 export const INVITATION_TOKEN_PATTERN = /^[a-f0-9]{64}$/i;
+export const DEFAULT_INVITATION_VERIFICATION_REQUIREMENTS = [
+  DocumentInvitationVerificationRequirement.EMAIL_OTP,
+  DocumentInvitationVerificationRequirement.IDENTITY_VERIFICATION,
+] as const;
+
+export type InvitationVerificationRequirement =
+  DocumentInvitationVerificationRequirement;
 
 export type InvitationSessionState = {
   emailOtpSentAt: Date | null;
@@ -35,7 +45,11 @@ export type OtpVerificationDecision =
   | { outcome: 'REQUEST_REQUIRED' }
   | { outcome: 'EXPIRED' }
   | { outcome: 'TOO_MANY_ATTEMPTS' }
-  | { outcome: 'INVALID_CODE'; nextAttemptCount: number; remainingAttempts: number }
+  | {
+      outcome: 'INVALID_CODE';
+      nextAttemptCount: number;
+      remainingAttempts: number;
+    }
   | { outcome: 'VERIFIED' };
 
 export type InvitationReviewDecision =
@@ -47,6 +61,36 @@ export type InvitationReviewDecision =
         | 'SESSION_EXPIRED'
         | 'IDENTITY_VERIFICATION_REQUIRED';
     };
+
+export function normalizeInvitationVerificationRequirements(
+  requirements?: readonly InvitationVerificationRequirement[] | null,
+): InvitationVerificationRequirement[] {
+  const source =
+    requirements === undefined || requirements === null
+      ? DEFAULT_INVITATION_VERIFICATION_REQUIREMENTS
+      : requirements;
+  const selected = new Set(source);
+
+  return DEFAULT_INVITATION_VERIFICATION_REQUIREMENTS.filter((requirement) =>
+    selected.has(requirement),
+  );
+}
+
+export function requiresInvitationEmailOtp(
+  requirements: readonly InvitationVerificationRequirement[],
+): boolean {
+  return requirements.includes(
+    DocumentInvitationVerificationRequirement.EMAIL_OTP,
+  );
+}
+
+export function requiresInvitationIdentityVerification(
+  requirements: readonly InvitationVerificationRequirement[],
+): boolean {
+  return requirements.includes(
+    DocumentInvitationVerificationRequirement.IDENTITY_VERIFICATION,
+  );
+}
 
 export function isValidInvitationTokenFormat(rawToken: string): boolean {
   return INVITATION_TOKEN_PATTERN.test(rawToken);
@@ -154,20 +198,27 @@ export function evaluateInvitationEmailOtpRequest(input: {
 }
 
 export function resolveInvitationGateNextStep(
-  session: Pick<
-    InvitationSessionState,
-    'emailOtpVerifiedAt' | 'completedAt'
-  >,
+  session: Pick<InvitationSessionState, 'emailOtpVerifiedAt' | 'completedAt'>,
+  requirements?: readonly InvitationVerificationRequirement[] | null,
 ): 'email_otp' | 'identity_verification' | 'review' {
-  if (!session.emailOtpVerifiedAt) {
+  const normalizedRequirements =
+    normalizeInvitationVerificationRequirements(requirements);
+
+  if (
+    requiresInvitationEmailOtp(normalizedRequirements) &&
+    !session.emailOtpVerifiedAt
+  ) {
     return 'email_otp';
   }
 
-  if (session.completedAt) {
-    return 'review';
+  if (
+    requiresInvitationIdentityVerification(normalizedRequirements) &&
+    !session.completedAt
+  ) {
+    return 'identity_verification';
   }
 
-  return 'identity_verification';
+  return 'review';
 }
 
 export function evaluateInvitationEmailOtpVerification(input: {
@@ -210,18 +261,41 @@ export function evaluateInvitationEmailOtpVerification(input: {
 }
 
 export function evaluateInvitationReviewAccess(input: {
-  session: Pick<InvitationSessionState, 'emailOtpVerifiedAt' | 'completedAt' | 'expiresAt'> | null;
+  session: Pick<
+    InvitationSessionState,
+    'emailOtpVerifiedAt' | 'completedAt' | 'expiresAt'
+  > | null;
+  requirements?: readonly InvitationVerificationRequirement[] | null;
   now: Date;
 }): InvitationReviewDecision {
-  if (!input.session || !input.session.emailOtpVerifiedAt) {
-    return { allowed: false, reason: 'EMAIL_OTP_REQUIRED' };
+  const requirements = normalizeInvitationVerificationRequirements(
+    input.requirements,
+  );
+  const emailRequired = requiresInvitationEmailOtp(requirements);
+  const identityRequired = requiresInvitationIdentityVerification(requirements);
+
+  if (!emailRequired && !identityRequired) {
+    return { allowed: true };
+  }
+
+  if (!input.session) {
+    return {
+      allowed: false,
+      reason: emailRequired
+        ? 'EMAIL_OTP_REQUIRED'
+        : 'IDENTITY_VERIFICATION_REQUIRED',
+    };
   }
 
   if (input.session.expiresAt.getTime() <= input.now.getTime()) {
     return { allowed: false, reason: 'SESSION_EXPIRED' };
   }
 
-  if (!input.session.completedAt) {
+  if (emailRequired && !input.session.emailOtpVerifiedAt) {
+    return { allowed: false, reason: 'EMAIL_OTP_REQUIRED' };
+  }
+
+  if (identityRequired && !input.session.completedAt) {
     return { allowed: false, reason: 'IDENTITY_VERIFICATION_REQUIRED' };
   }
 

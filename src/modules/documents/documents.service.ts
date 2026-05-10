@@ -27,6 +27,7 @@ import {
   CollaboratorPermission,
   CollaboratorRole,
   DocumentAccessAuditEvent,
+  DocumentInvitationVerificationRequirement,
   DocumentStatus,
   Prisma,
   SignatureRequestStatus,
@@ -68,7 +69,6 @@ import type { RequestUser } from '../auth/interfaces/jwt-payload.interface';
 // composes them; it does not reimplement them.
 import {
   deriveCollaboratorRoleFromPermissions,
-  DOCUMENT_PERMISSION_ORDER,
   getEffectiveDocumentPermissions,
   getLegacyPermissionsForRole,
   hasDocumentPermission,
@@ -88,6 +88,9 @@ import {
   evaluateInvitationLookupState,
   evaluateInvitationReviewAccess,
   isValidInvitationTokenFormat,
+  normalizeInvitationVerificationRequirements,
+  requiresInvitationEmailOtp,
+  requiresInvitationIdentityVerification,
   resolveInvitationEmailOtpResendAvailableAt as resolveInvitationEmailOtpResendAvailableAtRule,
   resolveInvitationGateNextStep,
   resolveInvitationVerificationSessionExpiry as resolveInvitationVerificationSessionExpiryRule,
@@ -116,8 +119,6 @@ import {
   DEFAULT_DOCUMENT_LAYOUT,
   mergeDocumentLayout,
   normalizeDocumentLayout,
-  type DocumentLayout,
-  type DocumentLayoutMargins,
 } from './helpers/document-layout.helper';
 import { buildDocumentListWhere } from './helpers/document-query.helper';
 import {
@@ -134,7 +135,6 @@ import {
   buildInvitationUrl,
 } from './helpers/document-url.helper';
 import {
-  buildSignatureReminderCooldownMap,
   getSignatureReminderRequestId,
   SIGNATURE_REMINDER_COOLDOWN_MS,
 } from './helpers/document-signature-reminder.helper';
@@ -411,6 +411,7 @@ export class DocumentsService {
             role: true,
             permissions: true,
             invitationStatus: true,
+            requiredVerifications: true,
             invitationExpiresAt: true,
             invitationEmailSentAt: true,
             invitationOpenedAt: true,
@@ -513,6 +514,7 @@ export class DocumentsService {
             role: true,
             permissions: true,
             invitationStatus: true,
+            requiredVerifications: true,
             invitationExpiresAt: true,
             invitationEmailSentAt: true,
             invitationOpenedAt: true,
@@ -625,12 +627,8 @@ export class DocumentsService {
         invitationStatus: event.invitationStatus,
         metadata: this.sanitizeAccessAuditMetadata(event.metadata),
         createdAt: event.createdAt,
-        actor: event.actorUser
-          ? formatAuditUser(event.actorUser)
-          : null,
-        target: event.targetUser
-          ? formatAuditUser(event.targetUser)
-          : null,
+        actor: event.actorUser ? formatAuditUser(event.actorUser) : null,
+        target: event.targetUser ? formatAuditUser(event.targetUser) : null,
       })),
     };
   }
@@ -685,7 +683,8 @@ export class DocumentsService {
         .sort((left, right) => {
           const leftResolved = left.resolvedAt ? 1 : 0;
           const rightResolved = right.resolvedAt ? 1 : 0;
-          if (leftResolved !== rightResolved) return leftResolved - rightResolved;
+          if (leftResolved !== rightResolved)
+            return leftResolved - rightResolved;
           return right.createdAt.getTime() - left.createdAt.getTime();
         })
         .map((comment) => formatDocumentComment(comment)),
@@ -735,7 +734,9 @@ export class DocumentsService {
       }
 
       if (parent.resolvedAt) {
-        throw new ConflictException('Resolved comments cannot receive replies.');
+        throw new ConflictException(
+          'Resolved comments cannot receive replies.',
+        );
       }
     }
 
@@ -803,7 +804,9 @@ export class DocumentsService {
       metadata: {
         commentId: comment.id,
         parentCommentId,
-        anchored: Boolean(anchorText && anchorFrom !== null && anchorTo !== null),
+        anchored: Boolean(
+          anchorText && anchorFrom !== null && anchorTo !== null,
+        ),
       },
     });
 
@@ -936,13 +939,20 @@ export class DocumentsService {
     }
 
     const permissions = this.normalizePermissions(dto.permissions);
-    if (!actorIsOwner && permissions.includes(CollaboratorPermission.MANAGE_ACCESS)) {
+    if (
+      !actorIsOwner &&
+      permissions.includes(CollaboratorPermission.MANAGE_ACCESS)
+    ) {
       throw new ForbiddenException(
         'Only the document owner can grant manage-access permission.',
       );
     }
 
     const role = this.deriveLegacyRole(permissions);
+    const verificationRequirements =
+      this.normalizeInvitationVerificationRequirements(
+        dto.verificationRequirements,
+      );
     const invitationExpiresAt = buildInvitationExpiry(dto.expiresInDays);
 
     const existing = await this.prisma.documentCollaborator.findUnique({
@@ -952,6 +962,7 @@ export class DocumentsService {
         userId: true,
         permissions: true,
         invitationStatus: true,
+        requiredVerifications: true,
         acceptedAt: true,
         isActive: true,
       },
@@ -986,6 +997,7 @@ export class DocumentsService {
           data: {
             role,
             permissions,
+            requiredVerifications: verificationRequirements,
             invitedByUserId: actorUserId,
             invitationStatus: existing.acceptedAt
               ? CollaboratorInvitationStatus.ACCEPTED
@@ -1007,6 +1019,7 @@ export class DocumentsService {
             role: true,
             permissions: true,
             invitationStatus: true,
+            requiredVerifications: true,
             invitationExpiresAt: true,
             invitationEmailSentAt: true,
             invitationOpenedAt: true,
@@ -1042,6 +1055,7 @@ export class DocumentsService {
             userId: dto.userId,
             role,
             permissions,
+            requiredVerifications: verificationRequirements,
             invitedByUserId: actorUserId,
             invitationStatus: CollaboratorInvitationStatus.PENDING,
             invitationTokenHash,
@@ -1054,6 +1068,7 @@ export class DocumentsService {
             role: true,
             permissions: true,
             invitationStatus: true,
+            requiredVerifications: true,
             invitationExpiresAt: true,
             invitationEmailSentAt: true,
             invitationOpenedAt: true,
@@ -1098,6 +1113,7 @@ export class DocumentsService {
       metadata: {
         notePresent: Boolean(dto.note?.trim()),
         expiresAt: invitationExpiresAt.toISOString(),
+        verificationRequirements,
       },
       ...context,
     });
@@ -1130,7 +1146,10 @@ export class DocumentsService {
           senderName: this.getInviterDisplayName(saved.invitedBy),
           accessSummary: this.describePermissions(permissions),
           note: dto.note?.trim() || null,
-          acceptUrl: buildInvitationUrl(this.resolveDocumentsFrontendUrl(), rawInvitationToken),
+          acceptUrl: buildInvitationUrl(
+            this.resolveDocumentsFrontendUrl(),
+            rawInvitationToken,
+          ),
           expiresIn: this.describeInvitationExpiry(invitationExpiresAt),
         });
 
@@ -1145,6 +1164,7 @@ export class DocumentsService {
             role: true,
             permissions: true,
             invitationStatus: true,
+            requiredVerifications: true,
             invitationExpiresAt: true,
             invitationEmailSentAt: true,
             invitationOpenedAt: true,
@@ -1187,7 +1207,8 @@ export class DocumentsService {
           toPermissions: permissions,
           invitationStatus: finalCollaborator.invitationStatus,
           metadata: {
-            sentAt: finalCollaborator.invitationEmailSentAt?.toISOString() ?? null,
+            sentAt:
+              finalCollaborator.invitationEmailSentAt?.toISOString() ?? null,
           },
           ...context,
         });
@@ -1205,7 +1226,9 @@ export class DocumentsService {
           invitationStatus: saved.invitationStatus,
           metadata: {
             message:
-              error instanceof Error ? error.message : 'Invitation email delivery failed.',
+              error instanceof Error
+                ? error.message
+                : 'Invitation email delivery failed.',
           },
           ...context,
         });
@@ -1270,8 +1293,9 @@ export class DocumentsService {
 
     if (!actorIsOwner) {
       const touchesManageAccess =
-        collaborator.permissions.includes(CollaboratorPermission.MANAGE_ACCESS) ||
-        permissions.includes(CollaboratorPermission.MANAGE_ACCESS);
+        collaborator.permissions.includes(
+          CollaboratorPermission.MANAGE_ACCESS,
+        ) || permissions.includes(CollaboratorPermission.MANAGE_ACCESS);
 
       if (touchesManageAccess) {
         throw new ForbiddenException(
@@ -1292,6 +1316,7 @@ export class DocumentsService {
         role: true,
         permissions: true,
         invitationStatus: true,
+        requiredVerifications: true,
         invitationExpiresAt: true,
         invitationEmailSentAt: true,
         invitationOpenedAt: true,
@@ -1374,6 +1399,7 @@ export class DocumentsService {
         userId: true,
         permissions: true,
         invitationStatus: true,
+        requiredVerifications: true,
         acceptedAt: true,
         isActive: true,
         note: true,
@@ -1404,7 +1430,9 @@ export class DocumentsService {
     }
 
     if (!actorIsOwner && collaborator.userId === actorUserId) {
-      throw new ForbiddenException('You cannot resend an invitation to yourself.');
+      throw new ForbiddenException(
+        'You cannot resend an invitation to yourself.',
+      );
     }
 
     if (
@@ -1442,6 +1470,7 @@ export class DocumentsService {
         role: true,
         permissions: true,
         invitationStatus: true,
+        requiredVerifications: true,
         invitationExpiresAt: true,
         invitationEmailSentAt: true,
         invitationOpenedAt: true,
@@ -1485,6 +1514,7 @@ export class DocumentsService {
         resent: true,
         previousStatus,
         expiresAt: invitationExpiresAt.toISOString(),
+        verificationRequirements: collaborator.requiredVerifications,
       },
       ...context,
     });
@@ -1516,7 +1546,10 @@ export class DocumentsService {
         senderName: this.getInviterDisplayName(saved.invitedBy),
         accessSummary: this.describePermissions(saved.permissions),
         note: saved.note,
-        acceptUrl: buildInvitationUrl(this.resolveDocumentsFrontendUrl(), rawInvitationToken),
+        acceptUrl: buildInvitationUrl(
+          this.resolveDocumentsFrontendUrl(),
+          rawInvitationToken,
+        ),
         expiresIn: this.describeInvitationExpiry(invitationExpiresAt),
       });
 
@@ -1529,6 +1562,7 @@ export class DocumentsService {
           role: true,
           permissions: true,
           invitationStatus: true,
+          requiredVerifications: true,
           invitationExpiresAt: true,
           invitationEmailSentAt: true,
           invitationOpenedAt: true,
@@ -1570,11 +1604,12 @@ export class DocumentsService {
         invitationStatus: finalCollaborator.invitationStatus,
         metadata: {
           resent: true,
-          sentAt: finalCollaborator.invitationEmailSentAt?.toISOString() ?? null,
+          sentAt:
+            finalCollaborator.invitationEmailSentAt?.toISOString() ?? null,
         },
         ...context,
       });
-    } catch (error) {
+    } catch {
       emailStatus = 'failed';
 
       await this.recordAccessAudit({
@@ -1588,8 +1623,7 @@ export class DocumentsService {
         invitationStatus: saved.invitationStatus,
         metadata: {
           resent: true,
-          message:
-            error instanceof Error ? error.message : 'Invitation email delivery failed.',
+          message: 'Invitation email delivery failed.',
         },
         ...context,
       });
@@ -1691,7 +1725,10 @@ export class DocumentsService {
           actor?.email ?? 'A document access manager',
         ),
         documentTitle: document.title,
-        signUrl: buildDocumentEditUrl(this.resolveDocumentsFrontendUrl(), documentId),
+        signUrl: buildDocumentEditUrl(
+          this.resolveDocumentsFrontendUrl(),
+          documentId,
+        ),
       });
 
       await this.recordAccessAudit({
@@ -1718,7 +1755,7 @@ export class DocumentsService {
           sentAt.getTime() + SIGNATURE_REMINDER_COOLDOWN_MS,
         ),
       };
-    } catch (error) {
+    } catch (error: unknown) {
       await this.recordAccessAudit({
         documentId,
         collaboratorId: null,
@@ -1827,6 +1864,7 @@ export class DocumentsService {
       requiresAuthentication: true,
       invitation: {
         permissions: invitation.permissions,
+        verificationRequirements: invitation.requiredVerifications,
         note: invitation.note,
         invitedAt: invitation.invitedAt,
         expiresAt: invitation.invitationExpiresAt,
@@ -1854,6 +1892,7 @@ export class DocumentsService {
       return {
         status: 'pending',
         nextStep: 'login',
+        verificationRequirements: invitation.requiredVerifications,
         emailOtp: null,
         identityVerification: null,
       };
@@ -1870,8 +1909,14 @@ export class DocumentsService {
       sessionUser,
       context,
     );
-    const syncedSession = await this.syncInvitationIdentityVerification(
+    const preparedSession = await this.prepareInvitationGateSession(
       verificationSession,
+      invitation,
+      sessionUser.userId,
+      context,
+    );
+    const syncedSession = await this.syncInvitationIdentityVerification(
+      preparedSession,
       invitation,
       sessionUser.userId,
       context,
@@ -1900,15 +1945,21 @@ export class DocumentsService {
       sessionUser,
       context,
     );
+    const requirements = normalizeInvitationVerificationRequirements(
+      invitation.requiredVerifications,
+    );
+
+    if (!requiresInvitationEmailOtp(requirements)) {
+      throw new BadRequestException(
+        'Email verification is not required for this invitation.',
+      );
+    }
 
     const normalizedEmail = dto.email.trim().toLowerCase();
     const invitedEmail = invitation.user.email.trim().toLowerCase();
     const signedInEmail = sessionUser.email.trim().toLowerCase();
 
-    if (
-      normalizedEmail !== invitedEmail ||
-      normalizedEmail !== signedInEmail
-    ) {
+    if (normalizedEmail !== invitedEmail || normalizedEmail !== signedInEmail) {
       await this.recordAccessAudit({
         documentId: invitation.documentId,
         collaboratorId: invitation.id,
@@ -1930,12 +1981,16 @@ export class DocumentsService {
     }
 
     if (verificationSession.emailOtpVerifiedAt) {
-      const challengedSession = await this.beginInvitationIdentityChallenge(
-        verificationSession,
-        invitation,
-        sessionUser.userId,
-        context,
-      );
+      const challengedSession = requiresInvitationIdentityVerification(
+        requirements,
+      )
+        ? await this.beginInvitationIdentityChallenge(
+            verificationSession,
+            invitation,
+            sessionUser.userId,
+            context,
+          )
+        : verificationSession;
       const syncedSession = await this.syncInvitationIdentityVerification(
         challengedSession,
         invitation,
@@ -1995,7 +2050,7 @@ export class DocumentsService {
         code: rawCode,
         expiresInMinutes: INVITATION_EMAIL_OTP_EXPIRY_MS / 60_000,
       });
-    } catch (error) {
+    } catch {
       await this.prisma.documentInvitationVerificationSession.update({
         where: { collaboratorId: invitation.id },
         data: {
@@ -2065,6 +2120,15 @@ export class DocumentsService {
       sessionUser,
       context,
     );
+    const requirements = normalizeInvitationVerificationRequirements(
+      invitation.requiredVerifications,
+    );
+
+    if (!requiresInvitationEmailOtp(requirements)) {
+      throw new BadRequestException(
+        'Email verification is not required for this invitation.',
+      );
+    }
 
     const otpDecision = evaluateInvitationEmailOtpVerification({
       session: {
@@ -2167,6 +2231,8 @@ export class DocumentsService {
     }
 
     const verifiedAt = new Date();
+    const identityRequired =
+      requiresInvitationIdentityVerification(requirements);
     const emailVerifiedSession =
       await this.prisma.documentInvitationVerificationSession.update({
         where: { collaboratorId: invitation.id },
@@ -2175,6 +2241,7 @@ export class DocumentsService {
           emailOtpExpiresAt: null,
           emailOtpAttemptCount: 0,
           emailOtpVerifiedAt: verifiedAt,
+          completedAt: identityRequired ? null : verifiedAt,
         },
       });
 
@@ -2193,12 +2260,14 @@ export class DocumentsService {
       ...context,
     });
 
-    const challengedSession = await this.beginInvitationIdentityChallenge(
-      emailVerifiedSession,
-      invitation,
-      sessionUser.userId,
-      context,
-    );
+    const challengedSession = identityRequired
+      ? await this.beginInvitationIdentityChallenge(
+          emailVerifiedSession,
+          invitation,
+          sessionUser.userId,
+          context,
+        )
+      : emailVerifiedSession;
 
     const syncedSession = await this.syncInvitationIdentityVerification(
       challengedSession,
@@ -2219,7 +2288,10 @@ export class DocumentsService {
     rawToken: string,
     context: AccessAuditContext = {},
   ) {
-    const invitation = await this.getInvitationForCompletedReview(userId, rawToken);
+    const invitation = await this.getInvitationForCompletedReview(
+      userId,
+      rawToken,
+    );
     const verificationSession =
       await this.prisma.documentInvitationVerificationSession.findUnique({
         where: { collaboratorId: invitation.id },
@@ -2234,6 +2306,7 @@ export class DocumentsService {
       },
       invitation: {
         permissions: invitation.permissions,
+        verificationRequirements: invitation.requiredVerifications,
         note: invitation.note,
         invitedAt: invitation.invitedAt,
         expiresAt: invitation.invitationExpiresAt,
@@ -2267,7 +2340,10 @@ export class DocumentsService {
     rawToken: string,
     context: AccessAuditContext = {},
   ) {
-    const invitation = await this.getInvitationForCompletedReview(userId, rawToken);
+    const invitation = await this.getInvitationForCompletedReview(
+      userId,
+      rawToken,
+    );
     const acceptedAt = new Date();
 
     const accepted = await this.prisma.documentCollaborator.update({
@@ -2287,6 +2363,7 @@ export class DocumentsService {
         userId: true,
         permissions: true,
         invitationStatus: true,
+        requiredVerifications: true,
         invitationExpiresAt: true,
         invitationEmailSentAt: true,
         invitationOpenedAt: true,
@@ -2474,7 +2551,9 @@ export class DocumentsService {
       data: {
         ...(dto.title !== undefined ? { title: dto.title } : {}),
         ...(dto.tags !== undefined ? { tags: dto.tags } : {}),
-        ...(dto.layout !== undefined ? { layout: layout as Prisma.InputJsonValue } : {}),
+        ...(dto.layout !== undefined
+          ? { layout: layout as Prisma.InputJsonValue }
+          : {}),
       },
     });
 
@@ -2678,7 +2757,9 @@ export class DocumentsService {
           documentId,
           includeSignerProfiles,
         ),
-        signatureSnapshot: await this.buildSignatureSnapshot(updated ?? document),
+        signatureSnapshot: await this.buildSignatureSnapshot(
+          updated ?? document,
+        ),
         completedSignatures,
         signatureId: dto.signatureId,
         pendingSignatureCount,
@@ -2763,7 +2844,9 @@ export class DocumentsService {
       );
     }
 
-    const fallbackSnapshot = await this.buildSignerSnapshot(primarySignature.userId);
+    const fallbackSnapshot = await this.buildSignerSnapshot(
+      primarySignature.userId,
+    );
     const signatureSnapshot = {
       signerDisplayName:
         primarySignature.signerDisplayNameSnapshot ??
@@ -2893,8 +2976,10 @@ export class DocumentsService {
     const updated = await this.prisma.document.update({
       where: { id: documentId },
       data: {
-        signatureBlockX: dto.x ?? document.signatureBlockX ?? DEFAULT_SIGNATURE_X,
-        signatureBlockY: dto.y ?? document.signatureBlockY ?? DEFAULT_SIGNATURE_Y,
+        signatureBlockX:
+          dto.x ?? document.signatureBlockX ?? DEFAULT_SIGNATURE_X,
+        signatureBlockY:
+          dto.y ?? document.signatureBlockY ?? DEFAULT_SIGNATURE_Y,
       },
     });
 
@@ -3013,10 +3098,9 @@ export class DocumentsService {
       },
       signedAt: document.signedAt,
       lockedAt: document.lockedAt,
-      signers: (await this.getCompletedSignatureSummaries(
-        documentId,
-        document.ownerId,
-      )).map((signature, index) => ({
+      signers: (
+        await this.getCompletedSignatureSummaries(documentId, document.ownerId)
+      ).map((signature, index) => ({
         name: signature.signerName,
         email: signature.signerEmail,
         signedAt: signature.signedAt,
@@ -3313,8 +3397,7 @@ export class DocumentsService {
         },
       });
     const recentForRequest = recentReminderEvents.find(
-      (event) =>
-        getSignatureReminderRequestId(event.metadata) === requestId,
+      (event) => getSignatureReminderRequestId(event.metadata) === requestId,
     );
 
     if (!recentForRequest) {
@@ -3445,28 +3528,30 @@ export class DocumentsService {
 
     if (!signatureId) return null;
 
-    return this.prisma.personalSignedDocument.findUnique({
-      where: { id: signatureId },
-      select: { id: true, userId: true, signedAt: true, certificateId: true },
-    }).then((signedDocument) => {
-      if (!signedDocument) {
-        return null;
-      }
+    return this.prisma.personalSignedDocument
+      .findUnique({
+        where: { id: signatureId },
+        select: { id: true, userId: true, signedAt: true, certificateId: true },
+      })
+      .then((signedDocument) => {
+        if (!signedDocument) {
+          return null;
+        }
 
-      const sourceRequest = ownerRequest ?? firstRequest ?? null;
-      return {
-        ...signedDocument,
-        signerDisplayNameSnapshot:
-          sourceRequest?.signerDisplayNameSnapshot ?? null,
-        signerEmailSnapshot: sourceRequest?.signerEmailSnapshot ?? null,
-        signatureImageS3KeySnapshot:
-          sourceRequest?.signatureImageS3KeySnapshot ?? null,
-        signatureImageMimeTypeSnapshot:
-          sourceRequest?.signatureImageMimeTypeSnapshot ?? null,
-        signatureImageSizeBytesSnapshot:
-          sourceRequest?.signatureImageSizeBytesSnapshot ?? null,
-      };
-    });
+        const sourceRequest = ownerRequest ?? firstRequest ?? null;
+        return {
+          ...signedDocument,
+          signerDisplayNameSnapshot:
+            sourceRequest?.signerDisplayNameSnapshot ?? null,
+          signerEmailSnapshot: sourceRequest?.signerEmailSnapshot ?? null,
+          signatureImageS3KeySnapshot:
+            sourceRequest?.signatureImageS3KeySnapshot ?? null,
+          signatureImageMimeTypeSnapshot:
+            sourceRequest?.signatureImageMimeTypeSnapshot ?? null,
+          signatureImageSizeBytesSnapshot:
+            sourceRequest?.signatureImageSizeBytesSnapshot ?? null,
+        };
+      });
   }
 
   private async buildSignerSnapshot(userId: string) {
@@ -3545,10 +3630,7 @@ export class DocumentsService {
 
     if (signatureImageS3Key) {
       try {
-        imageUrl = await this.s3.getPresignedUrl(
-          signatureImageS3Key,
-          3600,
-        );
+        imageUrl = await this.s3.getPresignedUrl(signatureImageS3Key, 3600);
       } catch (error) {
         this.logger.warn(
           `Failed to create completed signature URL for request ${request.id}: ${String(error)}`,
@@ -3669,15 +3751,13 @@ export class DocumentsService {
   }
 
   private hasPermission(
-    collaborator:
-      | {
-          role: CollaboratorRole;
-          permissions: CollaboratorPermission[];
-          invitationStatus: CollaboratorInvitationStatus;
-          acceptedAt: Date | null;
-          isActive: boolean;
-        }
-      | null,
+    collaborator: {
+      role: CollaboratorRole;
+      permissions: CollaboratorPermission[];
+      invitationStatus: CollaboratorInvitationStatus;
+      acceptedAt: Date | null;
+      isActive: boolean;
+    } | null,
     permission: CollaboratorPermission,
   ): boolean {
     return hasDocumentPermission(
@@ -3716,11 +3796,15 @@ export class DocumentsService {
         tokenType: 'full' | 'limited';
       }>(token);
     } catch {
-      throw new UnauthorizedException('Your session is invalid. Please sign in again.');
+      throw new UnauthorizedException(
+        'Your session is invalid. Please sign in again.',
+      );
     }
 
     if (payload.tokenType !== 'full' && payload.tokenType !== 'limited') {
-      throw new UnauthorizedException('Your session is invalid. Please sign in again.');
+      throw new UnauthorizedException(
+        'Your session is invalid. Please sign in again.',
+      );
     }
 
     const user = await this.prisma.user.findUnique({
@@ -3775,27 +3859,28 @@ export class DocumentsService {
       return existing;
     }
 
-    const expiresAt = this.resolveInvitationVerificationSessionExpiry(invitation);
+    const expiresAt =
+      this.resolveInvitationVerificationSessionExpiry(invitation);
 
     const session = existing
       ? await this.prisma.documentInvitationVerificationSession.update({
           where: { collaboratorId: invitation.id },
-        data: {
-          userId: invitation.userId,
-          documentId: invitation.documentId,
-          emailOtpCodeHash: null,
-          emailOtpSentAt: null,
-          emailOtpExpiresAt: null,
-          emailOtpVerifiedAt: null,
-          emailOtpAttemptCount: 0,
-          emailOtpRequestCount: 0,
-          emailOtpWindowStartedAt: null,
-          identityChallengeStartedAt: null,
-          identityFailureAttemptId: null,
-          identityVerificationAttemptId: null,
-          identityVerifiedAt: null,
-          completedAt: null,
-          expiresAt,
+          data: {
+            userId: invitation.userId,
+            documentId: invitation.documentId,
+            emailOtpCodeHash: null,
+            emailOtpSentAt: null,
+            emailOtpExpiresAt: null,
+            emailOtpVerifiedAt: null,
+            emailOtpAttemptCount: 0,
+            emailOtpRequestCount: 0,
+            emailOtpWindowStartedAt: null,
+            identityChallengeStartedAt: null,
+            identityFailureAttemptId: null,
+            identityVerificationAttemptId: null,
+            identityVerifiedAt: null,
+            completedAt: null,
+            expiresAt,
           },
         })
       : await this.prisma.documentInvitationVerificationSession.create({
@@ -3822,20 +3907,49 @@ export class DocumentsService {
       ...context,
     });
 
-    await this.recordAccessAudit({
-      documentId: invitation.documentId,
-      collaboratorId: invitation.id,
-      actorUserId: sessionUser.userId,
-      targetUserId: invitation.userId,
-      eventType: DocumentAccessAuditEvent.INVITE_EMAIL_OTP_REQUIRED,
-      fromPermissions: invitation.permissions,
-      toPermissions: invitation.permissions,
-      invitationStatus: invitation.invitationStatus,
-      metadata: null,
-      ...context,
-    });
+    if (requiresInvitationEmailOtp(invitation.requiredVerifications)) {
+      await this.recordAccessAudit({
+        documentId: invitation.documentId,
+        collaboratorId: invitation.id,
+        actorUserId: sessionUser.userId,
+        targetUserId: invitation.userId,
+        eventType: DocumentAccessAuditEvent.INVITE_EMAIL_OTP_REQUIRED,
+        fromPermissions: invitation.permissions,
+        toPermissions: invitation.permissions,
+        invitationStatus: invitation.invitationStatus,
+        metadata: null,
+        ...context,
+      });
+    }
 
     return session;
+  }
+
+  private async prepareInvitationGateSession(
+    session: InvitationVerificationSessionRecord,
+    invitation: InvitationLookupRecord,
+    actorUserId: string,
+    context: AccessAuditContext,
+  ): Promise<InvitationVerificationSessionRecord> {
+    const requirements = normalizeInvitationVerificationRequirements(
+      invitation.requiredVerifications,
+    );
+
+    if (!requiresInvitationIdentityVerification(requirements)) {
+      return session;
+    }
+
+    const emailRequired = requiresInvitationEmailOtp(requirements);
+    if (emailRequired && !session.emailOtpVerifiedAt) {
+      return session;
+    }
+
+    return this.beginInvitationIdentityChallenge(
+      session,
+      invitation,
+      actorUserId,
+      context,
+    );
   }
 
   private resolveInvitationEmailOtpResendAvailableAt(
@@ -3858,20 +3972,26 @@ export class DocumentsService {
     });
 
     if (!decision.allowed && decision.reason === 'RESEND_COOLDOWN') {
-      throw new HttpException({
-        message: 'Wait before requesting another verification code.',
-        retryAt: decision.retryAt.toISOString(),
-        retryAfterSeconds: decision.retryAfterSeconds,
-      }, HttpStatus.TOO_MANY_REQUESTS);
+      throw new HttpException(
+        {
+          message: 'Wait before requesting another verification code.',
+          retryAt: decision.retryAt.toISOString(),
+          retryAfterSeconds: decision.retryAfterSeconds,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
 
     if (!decision.allowed && decision.reason === 'RATE_LIMIT') {
-      throw new HttpException({
-        message:
-          'Too many verification codes have been requested. Try again later.',
-        retryAt: decision.retryAt.toISOString(),
-        retryAfterSeconds: decision.retryAfterSeconds,
-      }, HttpStatus.TOO_MANY_REQUESTS);
+      throw new HttpException(
+        {
+          message:
+            'Too many verification codes have been requested. Try again later.',
+          retryAt: decision.retryAt.toISOString(),
+          retryAfterSeconds: decision.retryAfterSeconds,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
   }
 
@@ -3893,8 +4013,8 @@ export class DocumentsService {
     }
 
     const challengeStartedAt = new Date();
-    const updated = await this.prisma.documentInvitationVerificationSession.update(
-      {
+    const updated =
+      await this.prisma.documentInvitationVerificationSession.update({
         where: { collaboratorId: invitation.id },
         data: {
           identityChallengeStartedAt: challengeStartedAt,
@@ -3903,8 +4023,7 @@ export class DocumentsService {
           identityVerifiedAt: null,
           completedAt: null,
         },
-      },
-    );
+      });
 
     await this.recordAccessAudit({
       documentId: invitation.documentId,
@@ -3931,7 +4050,11 @@ export class DocumentsService {
     context: AccessAuditContext,
   ): Promise<InvitationVerificationSessionRecord> {
     if (
-      !session.emailOtpVerifiedAt ||
+      (requiresInvitationEmailOtp(invitation.requiredVerifications) &&
+        !session.emailOtpVerifiedAt) ||
+      !requiresInvitationIdentityVerification(
+        invitation.requiredVerifications,
+      ) ||
       !session.identityChallengeStartedAt ||
       session.completedAt
     ) {
@@ -3997,16 +4120,15 @@ export class DocumentsService {
       return nextSession;
     }
 
-    const updated = await this.prisma.documentInvitationVerificationSession.update(
-      {
+    const updated =
+      await this.prisma.documentInvitationVerificationSession.update({
         where: { collaboratorId: invitation.id },
         data: {
           identityVerificationAttemptId: passedAttempt.id,
           identityVerifiedAt: passedAttempt.createdAt,
           completedAt: passedAttempt.createdAt,
         },
-      },
-    );
+      });
 
     if (!nextSession.identityVerificationAttemptId) {
       await this.recordAccessAudit({
@@ -4036,13 +4158,20 @@ export class DocumentsService {
     session: InvitationVerificationSessionRecord,
     sessionUser: RequestUser,
   ) {
+    const requirements = normalizeInvitationVerificationRequirements(
+      invitation.requiredVerifications,
+    );
     const resendAvailableAt =
       this.resolveInvitationEmailOtpResendAvailableAt(session);
-    const nextStep = resolveInvitationGateNextStep(session);
+    const nextStep = resolveInvitationGateNextStep(session, requirements);
+    const emailRequired = requiresInvitationEmailOtp(requirements);
+    const identityRequired =
+      requiresInvitationIdentityVerification(requirements);
 
     return {
       status: 'pending' as const,
       nextStep,
+      verificationRequirements: requirements,
       recipient: {
         email: invitation.user.email,
         displayName: this.formatUserDisplayName(
@@ -4057,14 +4186,14 @@ export class DocumentsService {
         isIdVerified: sessionUser.isIdVerified,
       },
       emailOtp: {
-        required: !session.emailOtpVerifiedAt,
+        required: emailRequired && !session.emailOtpVerifiedAt,
         sentAt: session.emailOtpSentAt,
         expiresAt: session.emailOtpExpiresAt,
         verifiedAt: session.emailOtpVerifiedAt,
         resendAvailableAt,
       },
       identityVerification: {
-        required: !!session.emailOtpVerifiedAt && !session.completedAt,
+        required: identityRequired && !session.completedAt,
         challengeStartedAt: session.identityChallengeStartedAt,
         verificationAttemptId: session.identityVerificationAttemptId,
         verifiedAt: session.identityVerifiedAt,
@@ -4084,24 +4213,40 @@ export class DocumentsService {
 
     const reviewDecision = evaluateInvitationReviewAccess({
       session,
+      requirements: invitation.requiredVerifications,
       now: new Date(),
     });
 
-    if (!reviewDecision.allowed && reviewDecision.reason === 'EMAIL_OTP_REQUIRED') {
+    if (
+      !reviewDecision.allowed &&
+      reviewDecision.reason === 'EMAIL_OTP_REQUIRED'
+    ) {
       throw new ForbiddenException(
         'Complete the invitation email verification step before continuing.',
       );
     }
 
-    if (!reviewDecision.allowed && reviewDecision.reason === 'SESSION_EXPIRED') {
+    if (
+      !reviewDecision.allowed &&
+      reviewDecision.reason === 'SESSION_EXPIRED'
+    ) {
       throw new ForbiddenException(
         'This invitation verification session expired. Restart the verification steps.',
       );
     }
 
-    if (!reviewDecision.allowed && reviewDecision.reason === 'IDENTITY_VERIFICATION_REQUIRED') {
+    if (
+      !reviewDecision.allowed &&
+      reviewDecision.reason === 'IDENTITY_VERIFICATION_REQUIRED'
+    ) {
+      if (!session) {
+        throw new ForbiddenException(
+          'Complete the invitation identity verification step before continuing.',
+        );
+      }
+
       const challengedSession = await this.beginInvitationIdentityChallenge(
-        session!,
+        session,
         invitation,
         invitation.userId,
         {},
@@ -4120,7 +4265,10 @@ export class DocumentsService {
       }
     }
 
-    if (!reviewDecision.allowed && reviewDecision.reason !== 'IDENTITY_VERIFICATION_REQUIRED') {
+    if (
+      !reviewDecision.allowed &&
+      reviewDecision.reason !== 'IDENTITY_VERIFICATION_REQUIRED'
+    ) {
       throw new ForbiddenException(
         'Complete the invitation identity verification step before continuing.',
       );
@@ -4149,6 +4297,14 @@ export class DocumentsService {
     }
 
     return normalized;
+  }
+
+  private normalizeInvitationVerificationRequirements(
+    requirements: ShareDocumentAccessDto['verificationRequirements'],
+  ): DocumentInvitationVerificationRequirement[] {
+    return normalizeInvitationVerificationRequirements(
+      requirements as DocumentInvitationVerificationRequirement[] | undefined,
+    );
   }
 
   private deriveLegacyRole(
@@ -4185,9 +4341,7 @@ export class DocumentsService {
     return this.config.getOrThrow<string>('FRONTEND_URL').replace(/\/$/, '');
   }
 
-  private describePermissions(
-    permissions: CollaboratorPermission[],
-  ): string {
+  private describePermissions(permissions: CollaboratorPermission[]): string {
     return describeDocumentPermissions(permissions);
   }
 
@@ -4204,7 +4358,9 @@ export class DocumentsService {
   }
 
   private getInviterDisplayName(
-    invitedBy: CollaboratorWithProfile['invitedBy'] | InvitationLookupRecord['invitedBy'],
+    invitedBy:
+      | CollaboratorWithProfile['invitedBy']
+      | InvitationLookupRecord['invitedBy'],
   ): string {
     return getDocumentInviterDisplayName(invitedBy);
   }
@@ -4234,6 +4390,7 @@ export class DocumentsService {
         permissions: true,
         invitationStatus: true,
         invitationTokenHash: true,
+        requiredVerifications: true,
         invitationExpiresAt: true,
         invitationEmailSentAt: true,
         invitationOpenedAt: true,
@@ -4275,7 +4432,9 @@ export class DocumentsService {
       throw new NotFoundException('Invitation not found or expired.');
     }
 
-    if (!this.encryption.compareHash(rawToken, invitation.invitationTokenHash)) {
+    if (
+      !this.encryption.compareHash(rawToken, invitation.invitationTokenHash)
+    ) {
       throw new NotFoundException('Invitation not found or expired.');
     }
 
@@ -4500,8 +4659,14 @@ export class DocumentsService {
         ? doc['signatureImageSizeBytes']
         : null;
     // Prefer stored x/y; fall back to position derived from legacy alignment enum.
-    const storedX = typeof doc['signatureBlockX'] === 'number' ? doc['signatureBlockX'] : null;
-    const storedY = typeof doc['signatureBlockY'] === 'number' ? doc['signatureBlockY'] : null;
+    const storedX =
+      typeof doc['signatureBlockX'] === 'number'
+        ? doc['signatureBlockX']
+        : null;
+    const storedY =
+      typeof doc['signatureBlockY'] === 'number'
+        ? doc['signatureBlockY']
+        : null;
     const fallback = alignmentToSignaturePosition(
       typeof doc['signatureBlockAlignment'] === 'string'
         ? doc['signatureBlockAlignment']

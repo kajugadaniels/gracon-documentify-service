@@ -24,6 +24,14 @@ export const COLLABORATOR_PERMISSIONS = [
 export type CollaboratorPermissionValue =
   (typeof COLLABORATOR_PERMISSIONS)[number];
 
+export const INVITATION_VERIFICATION_REQUIREMENTS = [
+  'EMAIL_OTP',
+  'IDENTITY_VERIFICATION',
+] as const;
+
+export type InvitationVerificationRequirementValue =
+  (typeof INVITATION_VERIFICATION_REQUIREMENTS)[number];
+
 export class ShareDocumentAccessDto {
   @ApiProperty({
     description: 'User who should receive document access.',
@@ -52,6 +60,19 @@ export class ShareDocumentAccessDto {
   @IsString()
   @MaxLength(1000)
   note?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Verification gates the recipient must complete after signing in. Omit to keep the legacy secure default of email OTP plus identity verification. Send an empty array when no extra verification is required.',
+    enum: INVITATION_VERIFICATION_REQUIREMENTS,
+    isArray: true,
+    default: INVITATION_VERIFICATION_REQUIREMENTS,
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsIn(INVITATION_VERIFICATION_REQUIREMENTS, { each: true })
+  verificationRequirements?: InvitationVerificationRequirementValue[];
 
   @ApiPropertyOptional({
     description:

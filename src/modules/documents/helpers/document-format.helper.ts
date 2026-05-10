@@ -28,6 +28,14 @@ import type {
   SignatureRequestSummary,
 } from './document-record.types';
 
+type FormattedDocumentCommentReply = Omit<
+  DocumentCommentReplyRecord,
+  'author'
+> & {
+  author: ReturnType<typeof formatCommentAuthor>;
+  replies: FormattedDocumentCommentReply[];
+};
+
 // ─── Audit log user formatting ──────────────────────────────────────────────
 
 /**
@@ -80,8 +88,7 @@ export function formatSignatureRequestSummary(
     signerEmailSnapshot: request.signerEmailSnapshot,
     signatureImageS3KeySnapshot: request.signatureImageS3KeySnapshot,
     signatureImageMimeTypeSnapshot: request.signatureImageMimeTypeSnapshot,
-    signatureImageSizeBytesSnapshot:
-      request.signatureImageSizeBytesSnapshot,
+    signatureImageSizeBytesSnapshot: request.signatureImageSizeBytesSnapshot,
     signedAt: request.signedAt,
     createdAt: request.createdAt,
     updatedAt: request.updatedAt,
@@ -133,7 +140,9 @@ export function formatCommentAuthor(user: DocumentCommentAuthorRecord): {
  * @param reply - Prisma reply row with the author joined in.
  * @returns The public reply shape used by the comments panel.
  */
-export function formatDocumentCommentReply(reply: DocumentCommentReplyRecord) {
+export function formatDocumentCommentReply(
+  reply: DocumentCommentReplyRecord,
+): FormattedDocumentCommentReply {
   return {
     id: reply.id,
     authorId: reply.authorId,
@@ -146,7 +155,7 @@ export function formatDocumentCommentReply(reply: DocumentCommentReplyRecord) {
     createdAt: reply.createdAt,
     updatedAt: reply.updatedAt,
     author: formatCommentAuthor(reply.author),
-    replies: [] as ReturnType<typeof formatDocumentCommentReply>[],
+    replies: [],
   };
 }
 
@@ -182,7 +191,9 @@ export function formatDocumentComment(comment: DocumentCommentRecord) {
  * @param collaborator - Joined collaborator row from Prisma.
  * @returns Public-facing collaborator with derived display names.
  */
-export function formatCollaboratorAccess(collaborator: CollaboratorWithProfile) {
+export function formatCollaboratorAccess(
+  collaborator: CollaboratorWithProfile,
+) {
   const displayName = formatDocumentUserDisplayName(
     collaborator.user.citizenIdentity?.postNames ?? null,
     collaborator.user.citizenIdentity?.surName ?? null,
@@ -195,6 +206,7 @@ export function formatCollaboratorAccess(collaborator: CollaboratorWithProfile) 
     role: collaborator.role,
     permissions: collaborator.permissions,
     invitationStatus: collaborator.invitationStatus,
+    verificationRequirements: collaborator.requiredVerifications,
     invitationExpiresAt: collaborator.invitationExpiresAt,
     invitationEmailSentAt: collaborator.invitationEmailSentAt,
     invitationOpenedAt: collaborator.invitationOpenedAt,

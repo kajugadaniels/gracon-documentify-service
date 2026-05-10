@@ -11,6 +11,7 @@ import {
   CollaboratorInvitationStatus,
   CollaboratorPermission,
   CollaboratorRole,
+  DocumentInvitationVerificationRequirement,
   Prisma,
 } from '@prisma/client';
 
@@ -57,18 +58,20 @@ export const COMPLETED_SIGNATURE_SELECT =
 
 // ─── Record shapes ──────────────────────────────────────────────────────────
 
-export type SignatureRequestBaseRecord = Prisma.DocumentSignatureRequestGetPayload<{
-  select: typeof SIGNATURE_REQUEST_SUMMARY_SELECT;
-}>;
+export type SignatureRequestBaseRecord =
+  Prisma.DocumentSignatureRequestGetPayload<{
+    select: typeof SIGNATURE_REQUEST_SUMMARY_SELECT;
+  }>;
 
 export type SignatureRequestProgressRecord =
   Prisma.DocumentSignatureRequestGetPayload<{
     select: typeof SIGNATURE_REQUEST_PROGRESS_SELECT;
   }>;
 
-export type CompletedSignatureRecord = Prisma.DocumentSignatureRequestGetPayload<{
-  select: typeof COMPLETED_SIGNATURE_SELECT;
-}>;
+export type CompletedSignatureRecord =
+  Prisma.DocumentSignatureRequestGetPayload<{
+    select: typeof COMPLETED_SIGNATURE_SELECT;
+  }>;
 
 /** Public-facing shape for a single requested-signer summary. */
 export type SignatureRequestUserSummary = {
@@ -122,6 +125,7 @@ export type CollaboratorAccessRecord = {
   role: CollaboratorRole;
   permissions: CollaboratorPermission[];
   invitationStatus: CollaboratorInvitationStatus;
+  requiredVerifications: DocumentInvitationVerificationRequirement[];
   invitationExpiresAt: Date | null;
   invitationEmailSentAt: Date | null;
   invitationOpenedAt: Date | null;
@@ -180,6 +184,7 @@ export type InvitationLookupRecord = {
   permissions: CollaboratorPermission[];
   invitationStatus: CollaboratorInvitationStatus;
   invitationTokenHash: string | null;
+  requiredVerifications: DocumentInvitationVerificationRequirement[];
   invitationExpiresAt: Date | null;
   invitationEmailSentAt: Date | null;
   invitationOpenedAt: Date | null;

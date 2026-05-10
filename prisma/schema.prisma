@@ -816,6 +816,7 @@ model DocumentCollaborator {
   invitedByUserId     String?
   invitationStatus    CollaboratorInvitationStatus   @default(PENDING)
   invitationTokenHash String?                        @unique             // hashed single-use invitation token
+  requiredVerifications DocumentInvitationVerificationRequirement[] @default([EMAIL_OTP, IDENTITY_VERIFICATION])
   invitationExpiresAt DateTime?
   invitationEmailSentAt DateTime?
   invitationOpenedAt  DateTime?
@@ -892,6 +893,11 @@ enum CollaboratorInvitationStatus {
   DECLINED
   REVOKED
   EXPIRED
+}
+
+enum DocumentInvitationVerificationRequirement {
+  EMAIL_OTP
+  IDENTITY_VERIFICATION
 }
 
 // ─── Document Access Audit Logs ───────────────────────────────────────────────

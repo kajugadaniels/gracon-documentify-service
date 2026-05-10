@@ -1,4 +1,7 @@
-import { CollaboratorInvitationStatus } from '@prisma/client';
+import {
+  CollaboratorInvitationStatus,
+  DocumentInvitationVerificationRequirement,
+} from '@prisma/client';
 import {
   evaluateInvitationEmailOtpRequest,
   evaluateInvitationEmailOtpVerification,
@@ -6,10 +9,17 @@ import {
   evaluateInvitationReviewAccess,
   INVITATION_TOKEN_PATTERN,
   isValidInvitationTokenFormat,
+  normalizeInvitationVerificationRequirements,
+  requiresInvitationEmailOtp,
+  requiresInvitationIdentityVerification,
   resolveInvitationEmailOtpResendAvailableAt,
   resolveInvitationGateNextStep,
   resolveInvitationVerificationSessionExpiry,
 } from './document-invitation.helper';
+
+const EMAIL_OTP = DocumentInvitationVerificationRequirement.EMAIL_OTP;
+const IDENTITY_VERIFICATION =
+  DocumentInvitationVerificationRequirement.IDENTITY_VERIFICATION;
 
 describe('document-invitation.helper', () => {
   it('validates the expected invitation token format', () => {
@@ -57,9 +67,9 @@ describe('document-invitation.helper', () => {
 
   it('computes otp resend availability from the last send time', () => {
     const sentAt = new Date('2026-01-01T09:00:00.000Z');
-    expect(
-      resolveInvitationEmailOtpResendAvailableAt(sentAt, 60_000),
-    ).toEqual(new Date('2026-01-01T09:01:00.000Z'));
+    expect(resolveInvitationEmailOtpResendAvailableAt(sentAt, 60_000)).toEqual(
+      new Date('2026-01-01T09:01:00.000Z'),
+    );
   });
 
   it('blocks otp requests during the resend cooldown window', () => {
@@ -137,6 +147,41 @@ describe('document-invitation.helper', () => {
     ).toBe('review');
   });
 
+  it('normalizes selected invitation verification requirements in canonical order', () => {
+    expect(normalizeInvitationVerificationRequirements(undefined)).toEqual([
+      EMAIL_OTP,
+      IDENTITY_VERIFICATION,
+    ]);
+    expect(
+      normalizeInvitationVerificationRequirements([
+        IDENTITY_VERIFICATION,
+        EMAIL_OTP,
+        IDENTITY_VERIFICATION,
+      ]),
+    ).toEqual([EMAIL_OTP, IDENTITY_VERIFICATION]);
+    expect(normalizeInvitationVerificationRequirements([])).toEqual([]);
+    expect(requiresInvitationEmailOtp([EMAIL_OTP])).toBe(true);
+    expect(requiresInvitationIdentityVerification([EMAIL_OTP])).toBe(false);
+  });
+
+  it('resolves optional invitation gate combinations', () => {
+    const pendingSession = { emailOtpVerifiedAt: null, completedAt: null };
+
+    expect(resolveInvitationGateNextStep(pendingSession, [])).toBe('review');
+    expect(
+      resolveInvitationGateNextStep(pendingSession, [IDENTITY_VERIFICATION]),
+    ).toBe('identity_verification');
+    expect(
+      resolveInvitationGateNextStep(
+        {
+          emailOtpVerifiedAt: new Date('2026-01-01T09:05:00.000Z'),
+          completedAt: null,
+        },
+        [EMAIL_OTP],
+      ),
+    ).toBe('review');
+  });
+
   it('returns otp verification outcomes for missing, expired, invalid, and verified cases', () => {
     expect(
       evaluateInvitationEmailOtpVerification({
@@ -203,6 +248,7 @@ describe('document-invitation.helper', () => {
     expect(
       evaluateInvitationReviewAccess({
         session: null,
+        requirements: [EMAIL_OTP, IDENTITY_VERIFICATION],
         now: new Date('2026-01-01T09:00:00.000Z'),
       }),
     ).toEqual({ allowed: false, reason: 'EMAIL_OTP_REQUIRED' });
@@ -214,6 +260,7 @@ describe('document-invitation.helper', () => {
           completedAt: null,
           expiresAt: new Date('2026-01-01T10:00:00.000Z'),
         },
+        requirements: [EMAIL_OTP, IDENTITY_VERIFICATION],
         now: new Date('2026-01-01T09:10:00.000Z'),
       }),
     ).toEqual({
@@ -228,6 +275,7 @@ describe('document-invitation.helper', () => {
           completedAt: new Date('2026-01-01T09:08:00.000Z'),
           expiresAt: new Date('2026-01-01T09:09:00.000Z'),
         },
+        requirements: [EMAIL_OTP, IDENTITY_VERIFICATION],
         now: new Date('2026-01-01T09:10:00.000Z'),
       }),
     ).toEqual({ allowed: false, reason: 'SESSION_EXPIRED' });
@@ -239,6 +287,27 @@ describe('document-invitation.helper', () => {
           completedAt: new Date('2026-01-01T09:08:00.000Z'),
           expiresAt: new Date('2026-01-01T10:00:00.000Z'),
         },
+        requirements: [EMAIL_OTP, IDENTITY_VERIFICATION],
+        now: new Date('2026-01-01T09:10:00.000Z'),
+      }),
+    ).toEqual({ allowed: true });
+
+    expect(
+      evaluateInvitationReviewAccess({
+        session: null,
+        requirements: [],
+        now: new Date('2026-01-01T09:00:00.000Z'),
+      }),
+    ).toEqual({ allowed: true });
+
+    expect(
+      evaluateInvitationReviewAccess({
+        session: {
+          emailOtpVerifiedAt: null,
+          completedAt: new Date('2026-01-01T09:08:00.000Z'),
+          expiresAt: new Date('2026-01-01T10:00:00.000Z'),
+        },
+        requirements: [IDENTITY_VERIFICATION],
         now: new Date('2026-01-01T09:10:00.000Z'),
       }),
     ).toEqual({ allowed: true });

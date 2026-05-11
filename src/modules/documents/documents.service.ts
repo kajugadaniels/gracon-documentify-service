@@ -79,8 +79,10 @@ import {
   buildRequiredSignerIds,
   canDocumentAcceptNewSignature,
   collaboratorRequiresSignature as collaboratorRequiresSignatureRule,
+  evaluateSigningReadiness,
   evaluateLockDocument,
   resolveSigningStatusUpdate,
+  type SigningReadinessDecision,
 } from './helpers/document-signing.helper';
 import {
   evaluateInvitationEmailOtpRequest,
@@ -2635,6 +2637,104 @@ export class DocumentsService {
     };
   }
 
+  async getSigningReadiness(documentId: string, authHeader?: string | null) {
+    let sessionUser: RequestUser | null = null;
+
+    try {
+      sessionUser = await this.resolveInvitationSessionUser(authHeader);
+    } catch (error) {
+      if (error instanceof UnauthorizedException) {
+        return this.buildSigningReadinessResponse(documentId, {
+          status: 'needs_login',
+          canSign: false,
+          message:
+            'Sign in with the required account before signing this document.',
+        });
+      }
+
+      throw error;
+    }
+
+    if (!sessionUser) {
+      return this.buildSigningReadinessResponse(documentId, {
+        status: 'needs_login',
+        canSign: false,
+        message:
+          'Sign in with the required account before signing this document.',
+      });
+    }
+
+    if (sessionUser.tokenType !== 'full' || !sessionUser.isIdVerified) {
+      return this.buildSigningReadinessResponse(documentId, {
+        status: 'needs_identity_verification',
+        canSign: false,
+        message: 'Complete identity verification before signing this document.',
+      });
+    }
+
+    const document = await this.prisma.document.findUnique({
+      where: { id: documentId },
+      select: {
+        id: true,
+        ownerId: true,
+        status: true,
+        contentHash: true,
+        isDeleted: true,
+      },
+    });
+
+    if (!document || document.isDeleted) {
+      throw new NotFoundException('Document not found.');
+    }
+
+    await this.assertCanRead(sessionUser.userId, documentId, document.ownerId);
+
+    const now = new Date();
+    const [signatureRequest, activeCertificate] = await Promise.all([
+      this.prisma.documentSignatureRequest.findFirst({
+        where: { documentId, requestedUserId: sessionUser.userId },
+        select: {
+          id: true,
+          status: true,
+          signedAt: true,
+          personalSignedDocumentId: true,
+        },
+      }),
+      this.prisma.personalCertificate.findFirst({
+        where: {
+          userId: sessionUser.userId,
+          isRevoked: false,
+          notBefore: { lte: now },
+          notAfter: { gt: now },
+          keyPair: { isActive: true },
+        },
+        orderBy: { notAfter: 'desc' },
+        select: { id: true, notAfter: true },
+      }),
+    ]);
+
+    const decision = evaluateSigningReadiness({
+      hasSession: true,
+      hasFullVerifiedSession: true,
+      documentStatus: document.status,
+      hasDocumentHash: Boolean(document.contentHash),
+      hasSignatureRequest: Boolean(signatureRequest),
+      signatureRequestStatus: signatureRequest?.status ?? null,
+      hasActiveCertificate: Boolean(activeCertificate),
+    });
+
+    return this.buildSigningReadinessResponse(documentId, decision, {
+      documentStatus: document.status,
+      documentHash: document.contentHash,
+      signatureRequestId: signatureRequest?.id ?? null,
+      signedAt: signatureRequest?.signedAt ?? null,
+      personalSignedDocumentId:
+        signatureRequest?.personalSignedDocumentId ?? null,
+      certificateId: activeCertificate?.id ?? null,
+      certificateExpiresAt: activeCertificate?.notAfter ?? null,
+    });
+  }
+
   // ─── Sign ────────────────────────────────────────────────────────────────────
 
   async sign(userId: string, documentId: string, dto: SignDocumentDto) {
@@ -3777,6 +3877,34 @@ export class DocumentsService {
     role: CollaboratorRole,
   ): CollaboratorPermission[] {
     return getLegacyPermissionsForRole(role);
+  }
+
+  private buildSigningReadinessResponse(
+    documentId: string,
+    decision: SigningReadinessDecision,
+    details: {
+      documentStatus?: DocumentStatus | null;
+      documentHash?: string | null;
+      signatureRequestId?: string | null;
+      signedAt?: Date | null;
+      personalSignedDocumentId?: string | null;
+      certificateId?: string | null;
+      certificateExpiresAt?: Date | null;
+    } = {},
+  ) {
+    return {
+      documentId,
+      status: decision.status,
+      canSign: decision.canSign,
+      message: decision.message,
+      documentStatus: details.documentStatus ?? null,
+      documentHash: details.documentHash ?? null,
+      signatureRequestId: details.signatureRequestId ?? null,
+      signedAt: details.signedAt ?? null,
+      personalSignedDocumentId: details.personalSignedDocumentId ?? null,
+      certificateId: details.certificateId ?? null,
+      certificateExpiresAt: details.certificateExpiresAt ?? null,
+    };
   }
 
   private async resolveInvitationSessionUser(

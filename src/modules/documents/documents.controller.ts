@@ -527,6 +527,30 @@ export class DocumentsController {
     return this.service.finalise(user.userId, documentId, dto);
   }
 
+  @Get(':documentId/signing-readiness')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ strict: { limit: 60, ttl: 600_000 } })
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiOperation({
+    summary:
+      'Resolve whether the current session is ready to sign this document.',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Signing readiness decision, including login, identity, signer, certificate, and already-signed states.',
+  })
+  getSigningReadiness(
+    @Param('documentId') documentId: string,
+    @Req() req: Request,
+  ) {
+    return this.service.getSigningReadiness(
+      documentId,
+      req.get('authorization'),
+    );
+  }
+
   // ─── Sign ──────────────────────────────────────────────────────────────────
 
   @Post(':documentId/sign')

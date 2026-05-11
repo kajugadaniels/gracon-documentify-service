@@ -2,11 +2,13 @@ import {
   CollaboratorInvitationStatus,
   CollaboratorPermission,
   DocumentStatus,
+  SignatureRequestStatus,
 } from '@prisma/client';
 import {
   buildRequiredSignerIds,
   canDocumentAcceptNewSignature,
   collaboratorRequiresSignature,
+  evaluateSigningReadiness,
   evaluateLockDocument,
   resolveSigningStatusUpdate,
 } from './document-signing.helper';
@@ -101,6 +103,63 @@ describe('document-signing.helper', () => {
         status: DocumentStatus.FINALISED,
         signedAt: null,
       });
+    });
+  });
+
+  describe('evaluateSigningReadiness', () => {
+    const readyInput = {
+      hasSession: true,
+      hasFullVerifiedSession: true,
+      documentStatus: DocumentStatus.FINALISED,
+      hasDocumentHash: true,
+      hasSignatureRequest: true,
+      signatureRequestStatus: SignatureRequestStatus.PENDING,
+      hasActiveCertificate: true,
+    };
+
+    it('allows signing when the session, request, hash, and certificate are ready', () => {
+      expect(evaluateSigningReadiness(readyInput)).toEqual({
+        status: 'ready',
+        canSign: true,
+        message: 'Ready to sign this finalised document.',
+      });
+    });
+
+    it('requires login before revealing document-specific readiness', () => {
+      expect(
+        evaluateSigningReadiness({
+          ...readyInput,
+          hasSession: false,
+        }).status,
+      ).toBe('needs_login');
+    });
+
+    it('requires identity verification for limited or unverified sessions', () => {
+      expect(
+        evaluateSigningReadiness({
+          ...readyInput,
+          hasFullVerifiedSession: false,
+        }).status,
+      ).toBe('needs_identity_verification');
+    });
+
+    it('reports an already completed signer before certificate checks', () => {
+      expect(
+        evaluateSigningReadiness({
+          ...readyInput,
+          signatureRequestStatus: SignatureRequestStatus.SIGNED,
+          hasActiveCertificate: false,
+        }).status,
+      ).toBe('already_signed');
+    });
+
+    it('requires an active certificate for pending required signers', () => {
+      expect(
+        evaluateSigningReadiness({
+          ...readyInput,
+          hasActiveCertificate: false,
+        }).status,
+      ).toBe('needs_certificate');
     });
   });
 

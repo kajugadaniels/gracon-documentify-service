@@ -19,6 +19,7 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Document creation, autosave, rename, copy, and version restore
 - Persisted page layout metadata for paper size and margins
 - Finalise/sign/lock workflow
+- Signing-readiness endpoint for one-call UI gating before certificate signing
 - Sharing and collaborator permission model
 - Invitation issuance, review, and acceptance
 - Public authenticity verification payload
@@ -40,6 +41,7 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Invitation-token hashing instead of raw token storage
 - Owner/collaborator permission enforcement at service layer
 - Separation of finalise, sign, and lock actions
+- One-call signing readiness evaluation across session, identity, signer, certificate, and document state
 - Audit events for access, reminders, invitation proof chain, and signing flow
 - Lightweight metadata refresh for collaborative UI clients
 - Normalized page layout persistence so editor and export geometry stay aligned

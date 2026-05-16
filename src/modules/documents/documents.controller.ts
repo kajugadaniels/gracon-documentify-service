@@ -12,6 +12,7 @@ import {
   Header,
   HttpCode,
   HttpStatus,
+  ParseUUIDPipe,
   StreamableFile,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
@@ -50,6 +51,7 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import type { RequestUser } from '../auth/interfaces/jwt-payload.interface';
+import { InvitationTokenPipe } from './pipes/invitation-token.pipe';
 
 @ApiTags('Documents')
 @ApiBearerAuth()
@@ -108,13 +110,16 @@ export class DocumentsController {
 
   @Get('invitations/:token')
   @Public()
-  @Throttle({ strict: { limit: 30, ttl: 600_000 } })
+  @Throttle({ strict: { limit: 15, ttl: 600_000 } })
   @ApiParam({ name: 'token', type: String })
   @ApiOperation({
     summary:
       'Public invitation preview endpoint. Returns only safe metadata before authentication.',
   })
-  previewInvitation(@Param('token') token: string, @Req() req: Request) {
+  previewInvitation(
+    @Param('token', InvitationTokenPipe) token: string,
+    @Req() req: Request,
+  ) {
     return this.service.getInvitationPreview(token, {
       ipAddress: req.ip,
       userAgent: req.get('user-agent') ?? null,
@@ -122,7 +127,7 @@ export class DocumentsController {
   }
 
   @Get('invitations/:token/review')
-  @Throttle({ strict: { limit: 30, ttl: 600_000 } })
+  @Throttle({ strict: { limit: 20, ttl: 600_000 } })
   @ApiParam({ name: 'token', type: String })
   @ApiOperation({
     summary:
@@ -130,7 +135,7 @@ export class DocumentsController {
   })
   reviewInvitation(
     @CurrentUser() user: RequestUser,
-    @Param('token') token: string,
+    @Param('token', InvitationTokenPipe) token: string,
     @Req() req: Request,
   ) {
     return this.service.getInvitationReview(user.userId, token, {
@@ -141,13 +146,16 @@ export class DocumentsController {
 
   @Get('invitations/:token/gate')
   @Public()
-  @Throttle({ strict: { limit: 40, ttl: 600_000 } })
+  @Throttle({ strict: { limit: 20, ttl: 600_000 } })
   @ApiParam({ name: 'token', type: String })
   @ApiOperation({
     summary:
       'Resolve the next invitation step after login, email OTP, and identity verification.',
   })
-  getInvitationGateStatus(@Param('token') token: string, @Req() req: Request) {
+  getInvitationGateStatus(
+    @Param('token', InvitationTokenPipe) token: string,
+    @Req() req: Request,
+  ) {
     return this.service.getInvitationGateStatus(
       token,
       req.get('authorization'),
@@ -161,14 +169,14 @@ export class DocumentsController {
   @Post('invitations/:token/email-otp/request')
   @Public()
   @HttpCode(HttpStatus.OK)
-  @Throttle({ strict: { limit: 10, ttl: 600_000 } })
+  @Throttle({ strict: { limit: 5, ttl: 600_000 } })
   @ApiParam({ name: 'token', type: String })
   @ApiOperation({
     summary:
       'Send the invitation-scoped email OTP after the invited user types their email.',
   })
   requestInvitationEmailOtp(
-    @Param('token') token: string,
+    @Param('token', InvitationTokenPipe) token: string,
     @Body() dto: RequestInvitationEmailOtpDto,
     @Req() req: Request,
   ) {
@@ -186,14 +194,14 @@ export class DocumentsController {
   @Post('invitations/:token/email-otp/verify')
   @Public()
   @HttpCode(HttpStatus.OK)
-  @Throttle({ strict: { limit: 30, ttl: 600_000 } })
+  @Throttle({ strict: { limit: 10, ttl: 600_000 } })
   @ApiParam({ name: 'token', type: String })
   @ApiOperation({
     summary:
       'Verify the invitation-scoped email OTP before allowing identity verification or review.',
   })
   verifyInvitationEmailOtp(
-    @Param('token') token: string,
+    @Param('token', InvitationTokenPipe) token: string,
     @Body() dto: VerifyInvitationEmailOtpDto,
     @Req() req: Request,
   ) {
@@ -218,7 +226,7 @@ export class DocumentsController {
   })
   acceptInvitation(
     @CurrentUser() user: RequestUser,
-    @Param('token') token: string,
+    @Param('token', InvitationTokenPipe) token: string,
     @Req() req: Request,
   ) {
     return this.service.acceptInvitation(user.userId, token, {
@@ -237,7 +245,7 @@ export class DocumentsController {
   })
   declineInvitation(
     @CurrentUser() user: RequestUser,
-    @Param('token') token: string,
+    @Param('token', InvitationTokenPipe) token: string,
     @Req() req: Request,
   ) {
     return this.service.declineInvitation(user.userId, token, {
@@ -691,13 +699,14 @@ export class DocumentsController {
 
   @Get(':documentId/verify')
   @Public()
+  @Throttle({ strict: { limit: 60, ttl: 600_000 } })
   @ApiParam({ name: 'documentId', type: String })
   @ApiOperation({
     summary:
       'Public document verification endpoint. No auth required. ' +
       'Returns signing proof for any LOCKED document.',
   })
-  verify(@Param('documentId') documentId: string) {
+  verify(@Param('documentId', ParseUUIDPipe) documentId: string) {
     return this.service.verify(documentId);
   }
 }

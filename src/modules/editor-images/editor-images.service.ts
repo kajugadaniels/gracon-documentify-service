@@ -9,6 +9,7 @@ import * as crypto from 'node:crypto';
 import { S3Service } from '../../common/s3/s3.service';
 
 const DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const DEFAULT_IMAGE_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const EDITOR_IMAGE_PREFIX = 'document-editor-images';
 const TOKEN_VERSION = 'v1';
 const ALLOWED_IMAGE_TYPES = new Map<string, string>([
@@ -30,11 +31,13 @@ export interface EditorImageObject {
   buffer: Buffer;
   contentType: string;
   key: string;
+  cacheMaxAgeSeconds: number;
 }
 
 @Injectable()
 export class EditorImagesService {
   private readonly maxImageBytes: number;
+  private readonly tokenTtlSeconds: number;
 
   constructor(
     private readonly config: ConfigService,
@@ -43,6 +46,9 @@ export class EditorImagesService {
     this.maxImageBytes =
       this.config.get<number>('EDITOR_IMAGE_MAX_SIZE_BYTES') ??
       DEFAULT_MAX_IMAGE_BYTES;
+    this.tokenTtlSeconds =
+      this.config.get<number>('EDITOR_IMAGE_TOKEN_TTL_SECONDS') ??
+      DEFAULT_IMAGE_TOKEN_TTL_SECONDS;
   }
 
   /**
@@ -83,11 +89,16 @@ export class EditorImagesService {
    * @returns Binary image object and content type.
    */
   async getImageByToken(token: string): Promise<EditorImageObject> {
-    const key = this.verifyImageToken(token);
-    const buffer = await this.s3.getBuffer(key);
-    const contentType = this.contentTypeFromKey(key);
+    const resolvedToken = this.verifyImageToken(token);
+    const buffer = await this.s3.getBuffer(resolvedToken.key);
+    const contentType = this.contentTypeFromKey(resolvedToken.key);
 
-    return { buffer, contentType, key };
+    return {
+      buffer,
+      contentType,
+      key: resolvedToken.key,
+      cacheMaxAgeSeconds: resolvedToken.cacheMaxAgeSeconds,
+    };
   }
 
   private validateFile(file: Express.Multer.File) {
@@ -114,7 +125,11 @@ export class EditorImagesService {
 
   private createImageToken(key: string) {
     const payload = Buffer.from(
-      JSON.stringify({ v: TOKEN_VERSION, key }),
+      JSON.stringify({
+        v: TOKEN_VERSION,
+        key,
+        exp: Math.floor(Date.now() / 1000) + this.tokenTtlSeconds,
+      }),
       'utf8',
     ).toString('base64url');
     const signature = this.sign(payload);
@@ -122,7 +137,10 @@ export class EditorImagesService {
     return `${payload}.${signature}`;
   }
 
-  private verifyImageToken(token: string) {
+  private verifyImageToken(token: string): {
+    key: string;
+    cacheMaxAgeSeconds: number;
+  } {
     const [payload, signature] = token.split('.');
     if (!payload || !signature) {
       throw new BadRequestException('Invalid image token.');
@@ -139,27 +157,50 @@ export class EditorImagesService {
       throw new BadRequestException('Invalid image token.');
     }
 
-    let parsed: { v?: string; key?: string };
+    let parsed: { v?: string; key?: string; exp?: number };
     try {
       parsed = JSON.parse(
         Buffer.from(payload, 'base64url').toString('utf8'),
       ) as {
         v?: string;
         key?: string;
+        exp?: number;
       };
     } catch {
       throw new BadRequestException('Invalid image token.');
     }
 
-    if (
-      parsed.v !== TOKEN_VERSION ||
-      typeof parsed.key !== 'string' ||
-      !parsed.key.startsWith(`${EDITOR_IMAGE_PREFIX}/`)
-    ) {
+    if (parsed.v !== TOKEN_VERSION || !this.isValidEditorImageKey(parsed.key)) {
       throw new BadRequestException('Invalid image token.');
     }
 
-    return parsed.key;
+    if (typeof parsed.exp === 'number') {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+
+      if (parsed.exp <= nowSeconds) {
+        throw new BadRequestException('Image token has expired.');
+      }
+
+      return {
+        key: parsed.key,
+        cacheMaxAgeSeconds: Math.max(parsed.exp - nowSeconds, 0),
+      };
+    }
+
+    // Legacy tokens created before expiry support remain valid for existing
+    // documents; new uploads always receive expiring tokens.
+    return {
+      key: parsed.key,
+      cacheMaxAgeSeconds: DEFAULT_IMAGE_TOKEN_TTL_SECONDS,
+    };
+  }
+
+  private isValidEditorImageKey(key: unknown): key is string {
+    return (
+      typeof key === 'string' &&
+      key.startsWith(`${EDITOR_IMAGE_PREFIX}/`) &&
+      !key.includes('..')
+    );
   }
 
   private sign(payload: string) {

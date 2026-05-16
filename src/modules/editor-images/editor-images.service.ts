@@ -1,3 +1,9 @@
+/**
+ * editor-images.service.ts
+ *
+ * Validates editor-image uploads, stores them privately, and resolves
+ * tamper-proof render tokens without exposing raw S3 objects publicly.
+ */
 import {
   BadRequestException,
   Injectable,

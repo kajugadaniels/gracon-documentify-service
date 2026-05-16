@@ -1,3 +1,8 @@
+/**
+ * document-comment.dto.ts
+ *
+ * Defines validated request/query shapes for document review comments.
+ */
 import {
   IsInt,
   IsOptional,
@@ -69,4 +74,13 @@ export class QueryDocumentCommentsDto {
   @Min(1)
   @Max(100)
   limit?: number = 50;
+
+  @ApiPropertyOptional({
+    description:
+      'Top-level comment ID to continue loading older comment threads after.',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID()
+  cursor?: string;
 }

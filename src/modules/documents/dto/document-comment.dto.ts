@@ -3,9 +3,11 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class CreateDocumentCommentDto {
@@ -52,4 +54,19 @@ export class CreateDocumentCommentDto {
   @IsOptional()
   @IsUUID()
   parentCommentId?: string;
+}
+
+export class QueryDocumentCommentsDto {
+  @ApiPropertyOptional({
+    description: 'Maximum number of top-level comment threads to return.',
+    default: 50,
+    minimum: 1,
+    maximum: 100,
+  })
+  @IsOptional()
+  @Transform(({ value }) => parseInt(value, 10))
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number = 50;
 }

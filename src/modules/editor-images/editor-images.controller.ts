@@ -87,7 +87,10 @@ export class EditorImagesController {
     const image = await this.service.getImageByToken(token);
 
     res.setHeader('Content-Type', image.contentType);
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader(
+      'Cache-Control',
+      `private, max-age=${image.cacheMaxAgeSeconds}`,
+    );
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setHeader('X-Content-Type-Options', 'nosniff');
 

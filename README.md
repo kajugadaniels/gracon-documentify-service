@@ -48,6 +48,8 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Shared JWT validation against the auth service secret without reissuing tokens
 - Private S3 editor image storage with stable signed render URLs for rich-text content
 - Exact PID/NID collaborator search uses stored hashes instead of decrypting every verified user
+- New editor image render tokens include expiry metadata while legacy signed image URLs remain readable for existing documents
+- Comment thread listing is capped by default so large collaboration history cannot overload the editor on first load
 
 ## Main Modules
 
@@ -115,6 +117,7 @@ AWS_SECRET_ACCESS_KEY=
 AWS_S3_BUCKET_NAME=
 DOCUMENTS_API_PUBLIC_URL=http://localhost:3005/api/v1
 EDITOR_IMAGE_MAX_SIZE_BYTES=8388608
+EDITOR_IMAGE_TOKEN_TTL_SECONDS=2592000
 MAIL_HOST=
 MAIL_PORT=
 MAIL_USER=

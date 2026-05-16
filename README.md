@@ -47,6 +47,7 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Normalized page layout persistence so editor and export geometry stay aligned
 - Shared JWT validation against the auth service secret without reissuing tokens
 - Private S3 editor image storage with stable signed render URLs for rich-text content
+- Exact PID/NID collaborator search uses stored hashes instead of decrypting every verified user
 
 ## Main Modules
 
@@ -67,6 +68,7 @@ src/
     templates/      template listing and usage
     editor-images/  authenticated S3 image uploads for editor content
     documents/      document lifecycle, sharing, signing, verification
+                    document-query.service owns list reads outside the lifecycle service
   seeds/            optional seed data
 ```
 
@@ -137,6 +139,7 @@ APP_URL=http://localhost:4002
 - Treat S3 content as the canonical document body, not the database row
 - Keep document `layout` metadata compatible with editor and export consumers
 - Never run shared-schema migrations here
+- Keep splitting `documents.service.ts` by ownership. New query-only reads should go into `document-query.service.ts`; do not grow the lifecycle service for simple list/search reads.
 
 ## Contribution Checklist
 

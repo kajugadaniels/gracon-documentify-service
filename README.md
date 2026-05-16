@@ -52,6 +52,7 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - S3 access is centralized behind the SDK v3 `S3Service`; feature modules should not instantiate AWS clients directly
 - Editor image render-token behavior has unit coverage for expiring tokens, legacy token compatibility, and object-key prefix enforcement
 - Comment thread listing is capped by default so large collaboration history cannot overload the editor on first load
+- Comment thread listing supports cursor pagination with `hasMore` and `nextCursor` so clients can load older review history without unbounded queries
 - Public invitation routes validate token shape at the controller edge before service lookup or audit work
 - Public invitation and document verification routes use explicit throttling to reduce enumeration and abuse pressure
 
@@ -150,6 +151,7 @@ APP_URL=http://localhost:4002
 - Keep splitting `documents.service.ts` by ownership. New query-only reads should go into `document-query.service.ts`; do not grow the lifecycle service for simple list/search reads.
 - Keep public invitation and verify throttles intentionally conservative. Raise limits only with an abuse-case review.
 - Keep all S3 reads/writes behind `S3Service`. Do not reintroduce the deprecated AWS SDK v2 package or direct S3 clients inside feature modules.
+- Keep comment loading cursor-based. Do not replace it with an unbounded comment history load in the editor.
 
 ## Contribution Checklist
 
@@ -285,3 +287,4 @@ That suite now covers:
 - DTO validation for invitation email OTP request and verification
 - authenticated document creation route wiring
 - query-parameter transformation on document listing
+- cursor query transformation on bounded comment-thread pagination

@@ -1,3 +1,9 @@
+/**
+ * app.e2e-spec.ts
+ *
+ * Covers controller wiring, guard behavior, and DTO validation at the
+ * documents API HTTP boundary without using real external services.
+ */
 import {
   ArgumentMetadata,
   CanActivate,
@@ -20,6 +26,7 @@ import {
   RequestInvitationEmailOtpDto,
   VerifyInvitationEmailOtpDto,
 } from '../src/modules/documents/dto/invitation-email-otp.dto';
+import { QueryDocumentCommentsDto } from '../src/modules/documents/dto/document-comment.dto';
 import { IS_PUBLIC_KEY } from '../src/modules/auth/guards/verified-user.guard';
 
 class TestVerifiedUserGuard implements CanActivate {
@@ -69,8 +76,14 @@ function createHttpExecutionContext(
     getType: () => 'http',
     getArgs: () => [request],
     getArgByIndex: (index: number) => [request][index],
-    switchToRpc: () => ({ getData: () => undefined, getContext: () => undefined }),
-    switchToWs: () => ({ getClient: () => undefined, getData: () => undefined }),
+    switchToRpc: () => ({
+      getData: () => undefined,
+      getContext: () => undefined,
+    }),
+    switchToWs: () => ({
+      getClient: () => undefined,
+      getData: () => undefined,
+    }),
   } as ExecutionContext;
 }
 
@@ -87,6 +100,7 @@ describe('DocumentsController integration (test boundary)', () => {
     getInvitationGateStatus: jest.Mock;
     requestInvitationEmailOtp: jest.Mock;
     verifyInvitationEmailOtp: jest.Mock;
+    listComments: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -108,6 +122,9 @@ describe('DocumentsController integration (test boundary)', () => {
       verifyInvitationEmailOtp: jest
         .fn()
         .mockResolvedValue({ status: 'verified' }),
+      listComments: jest
+        .fn()
+        .mockResolvedValue({ comments: [], hasMore: false, nextCursor: null }),
     };
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -200,7 +217,11 @@ describe('DocumentsController integration (test boundary)', () => {
 
     expect(guard.canActivate(context)).toBe(true);
 
-    await controller.reviewInvitation(request.user, 'invite-token', request as never);
+    await controller.reviewInvitation(
+      request.user,
+      'invite-token',
+      request as never,
+    );
 
     expect(documentsService.getInvitationReview).toHaveBeenCalledWith(
       'user-123',
@@ -314,5 +335,43 @@ describe('DocumentsController integration (test boundary)', () => {
       limit: 10,
       scope: 'OWNED',
     });
+  });
+
+  it('transforms comment pagination query params before calling the service', async () => {
+    const request = {
+      get: jest.fn((header: string) =>
+        header === 'authorization' ? 'Bearer reviewer-1' : undefined,
+      ),
+    };
+    const context = createHttpExecutionContext(
+      DocumentsController,
+      DocumentsController.prototype.listComments,
+      request,
+    );
+    const query = await validateDto(
+      {
+        limit: '25',
+        cursor: '2f6f80f3-1cdd-4af2-b5bd-efea1b7d0eb1',
+      },
+      QueryDocumentCommentsDto,
+      'query',
+    );
+
+    expect(guard.canActivate(context)).toBe(true);
+
+    await controller.listComments(
+      request.user,
+      '167f193c-4739-4dfb-8812-70815ec18139',
+      query,
+    );
+
+    expect(documentsService.listComments).toHaveBeenCalledWith(
+      'reviewer-1',
+      '167f193c-4739-4dfb-8812-70815ec18139',
+      {
+        limit: 25,
+        cursor: '2f6f80f3-1cdd-4af2-b5bd-efea1b7d0eb1',
+      },
+    );
   });
 });

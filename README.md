@@ -9,7 +9,7 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Runtime: NestJS + TypeScript
 - Default port: `3005`
 - Database: shared Neon/Postgres via Prisma
-- Storage: AWS S3 for document payloads and related assets
+- Storage: AWS S3 for document payloads and related assets through the SDK v3 wrapper in `src/common/s3/s3.service.ts`
 - Primary consumer: `app/documents`
 
 ## What This Service Owns
@@ -49,6 +49,8 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Private S3 editor image storage with stable signed render URLs for rich-text content
 - Exact PID/NID collaborator search uses stored hashes instead of decrypting every verified user
 - New editor image render tokens include expiry metadata while legacy signed image URLs remain readable for existing documents
+- S3 access is centralized behind the SDK v3 `S3Service`; feature modules should not instantiate AWS clients directly
+- Editor image render-token behavior has unit coverage for expiring tokens, legacy token compatibility, and object-key prefix enforcement
 - Comment thread listing is capped by default so large collaboration history cannot overload the editor on first load
 - Public invitation routes validate token shape at the controller edge before service lookup or audit work
 - Public invitation and document verification routes use explicit throttling to reduce enumeration and abuse pressure
@@ -63,7 +65,7 @@ src/
     helpers/        hashing and version-key utilities
     mailer/         invitation and reminder emails
     prisma/         Prisma service/module
-    s3/             document content storage
+    s3/             SDK v3 private document content storage adapter
     security/       helmet and CORS
   modules/
     auth/           JWT validation only
@@ -147,6 +149,7 @@ APP_URL=http://localhost:4002
 - Never run shared-schema migrations here
 - Keep splitting `documents.service.ts` by ownership. New query-only reads should go into `document-query.service.ts`; do not grow the lifecycle service for simple list/search reads.
 - Keep public invitation and verify throttles intentionally conservative. Raise limits only with an abuse-case review.
+- Keep all S3 reads/writes behind `S3Service`. Do not reintroduce the deprecated AWS SDK v2 package or direct S3 clients inside feature modules.
 
 ## Contribution Checklist
 
@@ -192,6 +195,12 @@ Add unit tests in this order instead of trying to cover the whole service at onc
    URL sanitizers, filename builders, content-state validators, and status-transition validators
 6. Small branching service methods
    document status transitions, share permission mapping, audit event payload creation, and certificate/signature eligibility checks
+
+Editor image render-token tests must continue to cover:
+
+- newly generated tokens include expiry metadata and cache only for the remaining lifetime
+- legacy non-expiring tokens stay readable so existing signed document JSON does not break
+- malformed or path-escape object keys are rejected before any S3 read happens
 
 ## Current Test Foundation
 

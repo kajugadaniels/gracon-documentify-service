@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
@@ -10,6 +10,7 @@ import { ThrottlerExceptionFilter } from './common/filters/throttler-exception.f
 import { buildCorsConfig } from './common/security/cors.config';
 
 async function bootstrap() {
+  const logger = new Logger('DocumentsBootstrap');
   const app = await NestFactory.create(AppModule);
   const config = app.get(ConfigService);
   const port = config.get<number>('APP_PORT', 3005);
@@ -61,7 +62,7 @@ async function bootstrap() {
   }
 
   await app.listen(port);
-  console.log(
+  logger.log(
     `[${env.toUpperCase()}] Documents service on http://localhost:${port}/api/v1`,
   );
 }

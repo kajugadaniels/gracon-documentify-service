@@ -57,6 +57,7 @@ import {
   type CollaboratorPermissionValue,
 } from './dto/manage-access.dto';
 import { CreateDocumentCommentDto } from './dto/document-comment.dto';
+import { QueryDocumentCommentsDto } from './dto/document-comment.dto';
 import {
   RequestInvitationEmailOtpDto,
   VerifyInvitationEmailOtpDto,
@@ -554,7 +555,11 @@ export class DocumentsService {
     };
   }
 
-  async listComments(userId: string, documentId: string) {
+  async listComments(
+    userId: string,
+    documentId: string,
+    query: QueryDocumentCommentsDto = {},
+  ) {
     const document = await this.prisma.document.findUnique({
       where: { id: documentId },
       select: { id: true, ownerId: true, isDeleted: true },
@@ -566,9 +571,11 @@ export class DocumentsService {
 
     await this.assertCanRead(userId, documentId, document.ownerId);
 
+    const limit = query.limit ?? 50;
     const comments = await this.prisma.documentComment.findMany({
       where: { documentId, parentCommentId: null },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ resolvedAt: 'asc' }, { createdAt: 'desc' }],
+      take: limit,
       include: {
         author: {
           select: {
@@ -600,15 +607,8 @@ export class DocumentsService {
 
     return {
       documentId,
-      comments: comments
-        .sort((left, right) => {
-          const leftResolved = left.resolvedAt ? 1 : 0;
-          const rightResolved = right.resolvedAt ? 1 : 0;
-          if (leftResolved !== rightResolved)
-            return leftResolved - rightResolved;
-          return right.createdAt.getTime() - left.createdAt.getTime();
-        })
-        .map((comment) => formatDocumentComment(comment)),
+      limit,
+      comments: comments.map((comment) => formatDocumentComment(comment)),
     };
   }
 

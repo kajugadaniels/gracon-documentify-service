@@ -39,7 +39,10 @@ import {
   ShareDocumentAccessDto,
   UpdateDocumentAccessDto,
 } from './dto/manage-access.dto';
-import { CreateDocumentCommentDto } from './dto/document-comment.dto';
+import {
+  CreateDocumentCommentDto,
+  QueryDocumentCommentsDto,
+} from './dto/document-comment.dto';
 import {
   RequestInvitationEmailOtpDto,
   VerifyInvitationEmailOtpDto,
@@ -278,8 +281,9 @@ export class DocumentsController {
   listComments(
     @CurrentUser() user: RequestUser,
     @Param('documentId') documentId: string,
+    @Query() query: QueryDocumentCommentsDto,
   ) {
-    return this.service.listComments(user.userId, documentId);
+    return this.service.listComments(user.userId, documentId, query);
   }
 
   @Post(':documentId/comments')

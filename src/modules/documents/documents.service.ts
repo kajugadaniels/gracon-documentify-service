@@ -572,10 +572,26 @@ export class DocumentsService {
     await this.assertCanRead(userId, documentId, document.ownerId);
 
     const limit = query.limit ?? 50;
+    if (query.cursor) {
+      const cursorComment = await this.prisma.documentComment.findFirst({
+        where: {
+          id: query.cursor,
+          documentId,
+          parentCommentId: null,
+        },
+        select: { id: true },
+      });
+
+      if (!cursorComment) {
+        throw new BadRequestException('Invalid comments cursor.');
+      }
+    }
+
     const comments = await this.prisma.documentComment.findMany({
       where: { documentId, parentCommentId: null },
-      orderBy: [{ resolvedAt: 'asc' }, { createdAt: 'desc' }],
-      take: limit,
+      orderBy: [{ resolvedAt: 'asc' }, { createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
+      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
       include: {
         author: {
           select: {
@@ -604,11 +620,20 @@ export class DocumentsService {
         },
       },
     });
+    const hasMore = comments.length > limit;
+    const visibleComments = hasMore ? comments.slice(0, limit) : comments;
+    const nextCursor = hasMore
+      ? (visibleComments[visibleComments.length - 1]?.id ?? null)
+      : null;
 
     return {
       documentId,
       limit,
-      comments: comments.map((comment) => formatDocumentComment(comment)),
+      nextCursor,
+      hasMore,
+      comments: visibleComments.map((comment) =>
+        formatDocumentComment(comment),
+      ),
     };
   }
 

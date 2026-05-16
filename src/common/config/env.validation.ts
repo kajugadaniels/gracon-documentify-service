@@ -87,6 +87,12 @@ class EnvironmentVariables {
   @Max(20 * 1024 * 1024)
   EDITOR_IMAGE_MAX_SIZE_BYTES?: number;
 
+  @Transform(({ value }) => parseInt(value, 10))
+  @IsOptional()
+  @IsNumber()
+  @Min(60)
+  EDITOR_IMAGE_TOKEN_TTL_SECONDS?: number;
+
   @IsOptional()
   @IsString()
   DOCUMENTS_API_PUBLIC_URL?: string;

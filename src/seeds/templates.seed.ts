@@ -5,11 +5,13 @@
  */
 
 import 'dotenv/config';
+import { Logger } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { normalizeDatabaseUrl } from '../common/prisma/database-url.util';
 
 const connectionString = process.env.DATABASE_URL;
+const logger = new Logger('DocumentTemplatesSeed');
 
 if (!connectionString) {
   throw new Error('DATABASE_URL environment variable is not set');
@@ -756,7 +758,7 @@ const TEMPLATES = [
 ];
 
 async function main() {
-  console.log('🌱 Seeding document templates…');
+  logger.log('Seeding document templates...');
 
   for (const template of TEMPLATES) {
     const existingTemplate = await prisma.documentTemplate.findFirst({
@@ -780,15 +782,15 @@ async function main() {
       });
     }
 
-    console.log(`  ✅ ${template.name}`);
+    logger.log(`Seeded template: ${template.name}`);
   }
 
-  console.log(`\n✅ ${TEMPLATES.length} templates seeded successfully.`);
+  logger.log(`${TEMPLATES.length} templates seeded successfully.`);
 }
 
 main()
   .catch((e) => {
-    console.error(e);
+    logger.error('Document template seed failed.', e);
     process.exit(1);
   })
   .finally(() => prisma.$disconnect());

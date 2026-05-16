@@ -50,6 +50,8 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Exact PID/NID collaborator search uses stored hashes instead of decrypting every verified user
 - New editor image render tokens include expiry metadata while legacy signed image URLs remain readable for existing documents
 - Comment thread listing is capped by default so large collaboration history cannot overload the editor on first load
+- Public invitation routes validate token shape at the controller edge before service lookup or audit work
+- Public invitation and document verification routes use explicit throttling to reduce enumeration and abuse pressure
 
 ## Main Modules
 
@@ -132,6 +134,7 @@ APP_URL=http://localhost:4002
 - Validates auth-service JWTs but does not issue user tokens
 - Coordinates with signature/invitation flows through its own domain logic
 - Public verify responses must remain safe and intentionally scoped
+- Public route parameters should be parsed at the controller edge. Invitation tokens use the 64-character hex `InvitationTokenPipe`; public document verification uses UUID parsing before lookup.
 
 ## Important Rules
 
@@ -143,6 +146,7 @@ APP_URL=http://localhost:4002
 - Keep document `layout` metadata compatible with editor and export consumers
 - Never run shared-schema migrations here
 - Keep splitting `documents.service.ts` by ownership. New query-only reads should go into `document-query.service.ts`; do not grow the lifecycle service for simple list/search reads.
+- Keep public invitation and verify throttles intentionally conservative. Raise limits only with an abuse-case review.
 
 ## Contribution Checklist
 

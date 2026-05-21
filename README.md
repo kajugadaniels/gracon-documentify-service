@@ -83,6 +83,7 @@ src/
 
 ```text
 api/documents/
+  agents/        project-local AI agent rules
   prisma/
   src/
     common/
@@ -92,6 +93,12 @@ api/documents/
   package.json
   nest-cli.json
 ```
+
+## AI Agent Rules
+
+Project-local AI guidance lives in `agents/README.md`.
+
+Read that guide before changing document lifecycle, sharing, invitation, signing, S3, verification, Prisma, or public-route behavior. The agent guide is intentionally specific to this service so contributors preserve document access boundaries, invitation proof chains, canonical S3 storage, and the finalise/sign/lock workflow.
 
 ## Local Commands
 

@@ -1,4 +1,4 @@
-import { CollaboratorPermission, Prisma } from '@prisma/client';
+import { CollaboratorPermission, Prisma } from '@gracon/database';
 
 const ACCESS_AUDIT_METADATA_KEYS = [
   'acceptedAt',

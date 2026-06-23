@@ -43,3 +43,7 @@ Purpose: protect documents, signatures, invitation proofs, private S3 objects, a
 - Public invitation and verification routes must stay throttled.
 - Public route errors should be safe and generic.
 - Do not add unauthenticated routes without explicit token validation and throttling.
+
+## Environment Rules
+
+- Use only runtime `DATABASE_URL` credentials here; `DATABASE_MIGRATION_URL` belongs only in `api/database`.

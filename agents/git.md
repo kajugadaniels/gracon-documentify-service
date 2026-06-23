@@ -30,7 +30,7 @@ git commit -m "feat(documents): add explicit owner lock audit event"
 - `editor` - editor-image backend behavior.
 - `s3` - storage adapter behavior.
 - `mailer` - invitation and reminder email.
-- `prisma` - schema mirror, generated-client setup, migrations copied from owner service.
+- `prisma` - database-client integration and database-owned schema coordination.
 - `guards` - auth and route guards.
 - `security` - token, throttle, validation, or data-protection hardening.
 - `docs` - README, agent docs, Swagger-only changes.

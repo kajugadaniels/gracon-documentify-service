@@ -31,7 +31,7 @@ import {
   DocumentStatus,
   Prisma,
   SignatureRequestStatus,
-} from '@prisma/client';
+} from '@gracon/database';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { S3Service } from '../../common/s3/s3.service';

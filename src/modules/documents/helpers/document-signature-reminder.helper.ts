@@ -6,7 +6,7 @@
  * used by the signing-progress UI, and extracts the `requestId` metadata
  * field we stamp onto every reminder event.
  */
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '@gracon/database';
 
 /** Cooldown window between two reminder emails for the same signature request. */
 export const SIGNATURE_REMINDER_COOLDOWN_MS = 15 * 60 * 1000;

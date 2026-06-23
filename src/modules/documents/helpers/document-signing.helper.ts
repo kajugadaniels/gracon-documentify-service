@@ -3,7 +3,7 @@ import {
   CollaboratorPermission,
   DocumentStatus,
   SignatureRequestStatus,
-} from '@prisma/client';
+} from '@gracon/database';
 
 export type CollaboratorSigningEligibility = {
   permissions: CollaboratorPermission[];

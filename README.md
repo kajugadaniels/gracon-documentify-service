@@ -12,6 +12,9 @@ This service manages folders, templates, rich-text documents, autosave, version 
 - Storage: AWS S3 for document payloads and related assets through the SDK v3 wrapper in `src/common/s3/s3.service.ts`
 - Primary consumer: `app/documents`
 
+First clone database setup:
+[docs/database-setup.md](./docs/database-setup.md)
+
 ## What This Service Owns
 
 - Folder CRUD and listing

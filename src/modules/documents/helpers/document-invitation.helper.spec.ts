@@ -1,7 +1,7 @@
 import {
   CollaboratorInvitationStatus,
   DocumentInvitationVerificationRequirement,
-} from '@prisma/client';
+} from '@gracon/database';
 import {
   evaluateInvitationEmailOtpRequest,
   evaluateInvitationEmailOtpVerification,

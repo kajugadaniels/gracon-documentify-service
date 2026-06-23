@@ -1,0 +1,90 @@
+name: API service security checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  SERVICE_NAME: documents
+
+jobs:
+  service-security:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require database repository variable
+        env:
+          DATABASE_REPOSITORY: ${{ vars.GRACON_DATABASE_REPOSITORY }}
+        run: |
+          if [ -z "$DATABASE_REPOSITORY" ]; then
+            echo "Set the GRACON_DATABASE_REPOSITORY repository variable to the api/database GitHub repository, for example owner/database."
+            exit 1
+          fi
+
+      - name: Checkout service repo
+        uses: actions/checkout@v4
+        with:
+          path: api/${{ env.SERVICE_NAME }}
+
+      - name: Checkout database repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.GRACON_DATABASE_REPOSITORY }}
+          token: ${{ secrets.GRACON_DATABASE_REPOSITORY_TOKEN || github.token }}
+          path: api/database
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            api/database/package-lock.json
+            api/${{ env.SERVICE_NAME }}/package-lock.json
+
+      - name: Install database package
+        working-directory: api/database
+        run: npm ci
+
+      - name: Generate shared Prisma client
+        working-directory: api/database
+        run: npm run prisma:generate
+
+      - name: Build database package
+        working-directory: api/database
+        run: npm run build
+
+      - name: Check service database boundary
+        working-directory: api/database
+        env:
+          BOUNDARY_CONSUMERS: ${{ env.SERVICE_NAME }}
+        run: npm run check:boundary
+
+      - name: Check security hardening baseline
+        working-directory: api/database
+        run: npm run check:security
+
+      - name: Audit database package
+        working-directory: api/database
+        run: npm audit --audit-level=high
+
+      - name: Install service
+        working-directory: api/${{ env.SERVICE_NAME }}
+        run: npm ci
+
+      - name: Build service
+        working-directory: api/${{ env.SERVICE_NAME }}
+        run: npm run build
+
+      - name: Test service
+        working-directory: api/${{ env.SERVICE_NAME }}
+        run: npm test -- --runInBand
+
+      - name: Audit service
+        working-directory: api/${{ env.SERVICE_NAME }}
+        run: npm audit --audit-level=high

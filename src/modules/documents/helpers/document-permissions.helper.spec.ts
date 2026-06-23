@@ -2,7 +2,7 @@ import {
   CollaboratorInvitationStatus,
   CollaboratorPermission,
   CollaboratorRole,
-} from '@prisma/client';
+} from '@gracon/database';
 import {
   canUserAccessDocumentPermission,
   deriveCollaboratorRoleFromPermissions,

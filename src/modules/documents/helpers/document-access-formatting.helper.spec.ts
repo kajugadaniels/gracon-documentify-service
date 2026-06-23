@@ -1,4 +1,4 @@
-import { CollaboratorPermission } from '@prisma/client';
+import { CollaboratorPermission } from '@gracon/database';
 
 import {
   describeDocumentPermissions,

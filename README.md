@@ -84,7 +84,6 @@ src/
 ```text
 api/documents/
   agents/        project-local AI agent rules
-  prisma/
   src/
     common/
     modules/
@@ -111,7 +110,6 @@ npm run test:unit
 npm run test:e2e
 npm run test:all
 npm run lint
-npx prisma generate
 ```
 
 ## Environment Notes

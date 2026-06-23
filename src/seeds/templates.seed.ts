@@ -6,9 +6,7 @@
 
 import 'dotenv/config';
 import { Logger } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { normalizeDatabaseUrl } from '../common/prisma/database-url.util';
+import { createPrismaClient } from '@gracon/database';
 
 const connectionString = process.env.DATABASE_URL;
 const logger = new Logger('DocumentTemplatesSeed');
@@ -17,11 +15,7 @@ if (!connectionString) {
   throw new Error('DATABASE_URL environment variable is not set');
 }
 
-const prisma = new PrismaClient({
-  adapter: new PrismaPg({
-    connectionString: normalizeDatabaseUrl(connectionString),
-  }),
-});
+const prisma = createPrismaClient({ connectionString });
 
 const TEMPLATES = [
   {

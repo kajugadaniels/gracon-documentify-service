@@ -13,7 +13,7 @@ import {
   CollaboratorRole,
   DocumentInvitationVerificationRequirement,
   Prisma,
-} from '@prisma/client';
+} from '@gracon/database';
 
 // ─── Selects ────────────────────────────────────────────────────────────────
 //

@@ -7,7 +7,6 @@ Purpose: define where document backend files belong so the service stays navigab
 ```text
 api/documents/
   agents/              AI-agent project rules
-  prisma/              Prisma schema mirror and generated-client inputs
   src/
     common/
       config/          environment parsing and runtime configuration

@@ -9,7 +9,7 @@ import {
   CollaboratorInvitationStatus,
   CollaboratorPermission,
   Prisma,
-} from '@prisma/client';
+} from '@gracon/database';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { QueryDocumentsDto } from './dto/query-documents.dto';
 import {

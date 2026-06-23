@@ -5,7 +5,7 @@
  * because the scope-to-where mapping is pure and easy to unit test in
  * isolation from Prisma execution.
  */
-import { Prisma } from '@prisma/client';
+import { Prisma } from '@gracon/database';
 import type { DocumentListScope } from '../dto/query-documents.dto';
 
 /**

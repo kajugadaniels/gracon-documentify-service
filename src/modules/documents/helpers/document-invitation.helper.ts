@@ -1,7 +1,7 @@
 import {
   CollaboratorInvitationStatus,
   DocumentInvitationVerificationRequirement,
-} from '@prisma/client';
+} from '@gracon/database';
 
 export const INVITATION_TOKEN_PATTERN = /^[a-f0-9]{64}$/i;
 export const DEFAULT_INVITATION_VERIFICATION_REQUIREMENTS = [

@@ -5,9 +5,8 @@ Purpose: keep shared-schema use safe and prevent document queries from becoming 
 ## Shared Schema Rule
 
 - Meeting and document tables are owned by `api/database` migrations when the shared database schema changes.
-- `api/documents/prisma/schema.prisma` mirrors the shared schema for Prisma client generation.
 - Do not run shared-schema migrations from `api/documents`.
-- If a model/index/enum change is required, make the migration in `api/database` first, then mirror the schema here.
+- If a model/index/enum change is required, make the migration and regenerate the shared Prisma client in `api/database` first.
 
 ## Query Rules
 
@@ -33,4 +32,4 @@ Purpose: keep shared-schema use safe and prevent document queries from becoming 
 
 - Add indexes for new access patterns before shipping list/search endpoints.
 - Search by email, hashed PID/NID, document status, collaborator status, and invitation state should stay index-friendly.
-- Update `api/database` and `api/documents` Prisma schemas together when shared models change.
+- Update `api/database/prisma/schema.prisma` and regenerate the shared client when shared models change.

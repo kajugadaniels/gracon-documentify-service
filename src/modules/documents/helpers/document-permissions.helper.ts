@@ -2,7 +2,7 @@ import {
   CollaboratorInvitationStatus,
   CollaboratorPermission,
   CollaboratorRole,
-} from '@prisma/client';
+} from '@gracon/database';
 
 export const DOCUMENT_PERMISSION_ORDER: CollaboratorPermission[] = [
   CollaboratorPermission.READ,
